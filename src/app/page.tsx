@@ -2,12 +2,14 @@
 
 import dynamic from 'next/dynamic'
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
-import type { Aircraft, ConflictEvent, IntelBrief } from '@/lib/types'
+import type { Aircraft, ConflictEvent, IntelBrief, Ship, Notam } from '@/lib/types'
 import { detectClusters, type Cluster } from '@/lib/cluster'
 import { detectFormations, detectSquawkEmergencies, type Formation } from '@/lib/formation'
 import AircraftPanel from '@/components/AircraftPanel'
 import EventsFeed from '@/components/EventsFeed'
 import BriefDrawer from '@/components/BriefDrawer'
+import LiveATC from '@/components/LiveATC'
+import NewsPlayer from '@/components/NewsPlayer'
 import type { BriefTarget } from '@/components/Map'
 
 const GlobeMap = dynamic(() => import('@/components/Map'), {
@@ -64,6 +66,10 @@ export default function Dashboard() {
   const prevFormationsRef = useRef<Formation[]>([])
   const prevSquawksRef = useRef<string[]>([])
 
+  // Ships + NOTAMs
+  const [ships, setShips] = useState<Ship[]>([])
+  const [notams, setNotams] = useState<Notam[]>([])
+
   // Speed anomalies
   const prevVelocityRef = useRef<Map<string, number>>(new Map())
   const [speedAnomalies, setSpeedAnomalies] = useState<{ callsign: string; delta: number }[]>([])
@@ -75,6 +81,12 @@ export default function Dashboard() {
 
   useEffect(() => { aircraftRef.current = aircraft }, [aircraft])
   useEffect(() => { eventsRef.current = events }, [events])
+
+  // Fetch ships and NOTAMs once on mount
+  useEffect(() => {
+    fetch('/api/ships').then(r => r.json()).then((d: { ships: Ship[] }) => setShips(d.ships)).catch(() => {})
+    fetch('/api/notams').then(r => r.json()).then((d: { notams: Notam[] }) => setNotams(d.notams)).catch(() => {})
+  }, [])
 
   const clusters: Cluster[] = useMemo(() => detectClusters(aircraft), [aircraft])
   const formations: Formation[] = useMemo(() => detectFormations(aircraft), [aircraft])
@@ -270,7 +282,7 @@ export default function Dashboard() {
         <div className="flex items-center gap-3">
           <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--accent)', boxShadow: '0 0 8px var(--accent)' }} />
           <span className="font-mono text-sm font-bold tracking-widest uppercase" style={{ color: 'var(--foreground)' }}>
-            COBALT-INTEL
+            SKYVEIL
           </span>
           {isDemo && (
             <span className="font-mono text-[9px] px-1.5 py-0.5 rounded tracking-widest"
@@ -294,7 +306,7 @@ export default function Dashboard() {
           )}
           <span style={{ color: statusColor }}>● {status.toUpperCase()}</span>
           {lastUpdate && <span style={{ color: 'var(--muted)' }}>{lastUpdate.toLocaleTimeString()}</span>}
-          <span style={{ color: 'var(--muted)' }}>{aircraft.length} AC · {events.length} EVT</span>
+          <span style={{ color: 'var(--muted)' }}>{aircraft.length} AC · {ships.length} NAV · {events.length} EVT</span>
         </div>
       </header>
 
@@ -369,17 +381,22 @@ export default function Dashboard() {
       {/* Layout */}
       <div className="flex flex-1 overflow-hidden">
         <aside className="w-72 shrink-0 flex flex-col overflow-hidden" style={{ borderRight: '1px solid var(--border)' }}>
-          <AircraftPanel
-            aircraft={aircraft}
-            selected={selected}
-            onSelect={setSelected}
-            briefTarget={briefTarget}
-          />
+          <div className="flex-1 overflow-hidden flex flex-col">
+            <AircraftPanel
+              aircraft={aircraft}
+              selected={selected}
+              onSelect={setSelected}
+              briefTarget={briefTarget}
+            />
+          </div>
+          <LiveATC selected={selected} />
         </aside>
 
         <main className="flex-1 relative overflow-hidden">
           <GlobeMap
             aircraft={aircraft}
+            ships={ships}
+            notams={notams}
             clusters={clusters}
             formations={formations}
             trails={trails}
@@ -388,9 +405,12 @@ export default function Dashboard() {
             onBriefRequest={handleBriefRequest}
             briefTarget={briefTarget}
           />
+          <NewsPlayer />
           <div className="absolute bottom-4 left-4 rounded px-3 py-2 font-mono text-xs pointer-events-none"
             style={{ background: 'rgba(9,9,11,0.85)', border: '1px solid var(--border)', color: 'var(--muted)' }}>
             <div>Airborne <span style={{ color: 'var(--accent)', fontWeight: 700 }}>{aircraft.filter(a => !a.onGround).length}</span></div>
+            <div>Naval <span style={{ color: '#00b4ff', fontWeight: 700 }}>{ships.length}</span></div>
+            <div>NOTAMs <span style={{ color: '#fb923c', fontWeight: 700 }}>{notams.length}</span></div>
             <div>Formations <span style={{ color: formations.length > 0 ? '#f59e0b' : 'var(--muted)', fontWeight: 700 }}>{formations.length}</span></div>
             <div>Clusters <span style={{ color: clusters.length > 0 ? 'var(--threat)' : 'var(--muted)', fontWeight: 700 }}>{clusters.length}</span></div>
           </div>
