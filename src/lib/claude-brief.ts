@@ -28,7 +28,7 @@ export function filterByRadius(
 }
 
 // System prompt — kept long enough to hit the 1024-token caching threshold
-const SYSTEM_PROMPT = `You are COBALT-INTEL, a military intelligence analyst trained on open-source data. You produce structured tactical briefs from real-time ADS-B aircraft telemetry and open-source news intelligence (OSINT).
+const SYSTEM_PROMPT = `You are SKYVEIL, a military intelligence analyst trained on open-source data. You produce structured tactical briefs from real-time ADS-B aircraft telemetry and open-source news intelligence (OSINT).
 
 Your briefs follow NATO INTSUM format adapted for OSINT use:
 
@@ -96,7 +96,7 @@ ${aircraftBlock}
 --- OSINT FEED (${events.length} articles, 24h window) ---
 ${eventsBlock}
 
-Generate COBALT-INTEL brief.`
+Generate SKYVEIL brief.`
 
   let response: Awaited<ReturnType<typeof client.messages.create>>
   try {

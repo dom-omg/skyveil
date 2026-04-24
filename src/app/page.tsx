@@ -5,6 +5,8 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import type { Aircraft, ConflictEvent, IntelBrief, Ship, Notam } from '@/lib/types'
 import { detectClusters, type Cluster } from '@/lib/cluster'
 import { detectFormations, detectSquawkEmergencies, type Formation } from '@/lib/formation'
+import { detectOrbits, type OrbitAircraft } from '@/lib/orbit'
+import { computeThreat, type ThreatAssessment } from '@/lib/threat'
 import AircraftPanel from '@/components/AircraftPanel'
 import EventsFeed from '@/components/EventsFeed'
 import BriefDrawer from '@/components/BriefDrawer'
@@ -24,7 +26,7 @@ const GlobeMap = dynamic(() => import('@/components/Map'), {
 type ConnectionState = 'connecting' | 'live' | 'error' | 'reconnecting'
 
 export interface ActivityEvent {
-  type: 'CLUSTER' | 'FORMATION' | 'SQUAWK' | 'BRIEF' | 'ANOMALY'
+  type: 'CLUSTER' | 'FORMATION' | 'SQUAWK' | 'BRIEF' | 'ANOMALY' | 'ORBIT'
   message: string
   time: Date
   color: string
@@ -70,6 +72,9 @@ export default function Dashboard() {
   const [ships, setShips] = useState<Ship[]>([])
   const [notams, setNotams] = useState<Notam[]>([])
 
+  // Orbit history — 20 points per aircraft for ISR detection
+  const orbitHistRef = useRef<Map<string, { lat: number; lon: number }[]>>(new Map())
+
   // Speed anomalies
   const prevVelocityRef = useRef<Map<string, number>>(new Map())
   const [speedAnomalies, setSpeedAnomalies] = useState<{ callsign: string; delta: number }[]>([])
@@ -91,10 +96,16 @@ export default function Dashboard() {
   const clusters: Cluster[] = useMemo(() => detectClusters(aircraft), [aircraft])
   const formations: Formation[] = useMemo(() => detectFormations(aircraft), [aircraft])
   const squawkAlerts = useMemo(() => detectSquawkEmergencies(aircraft), [aircraft])
+  const orbits: OrbitAircraft[] = useMemo(() => detectOrbits(aircraft, orbitHistRef.current), [aircraft])
+  const threat: ThreatAssessment = useMemo(
+    () => computeThreat(clusters, formations, squawkAlerts, events, notams),
+    [clusters, formations, squawkAlerts, events, notams]
+  )
 
   // Trail history — accumulate position on every aircraft update
   useEffect(() => {
     const hist = trailsHistRef.current
+    const orbitHist = orbitHistRef.current
     for (const a of aircraft) {
       const pts = hist.get(a.icao24) ?? []
       const last = pts[pts.length - 1]
@@ -102,6 +113,11 @@ export default function Dashboard() {
         pts.push({ lat: a.lat, lon: a.lon })
         if (pts.length > MAX_TRAIL_POINTS) pts.shift()
         hist.set(a.icao24, pts)
+        // Orbit history keeps 20 points
+        const oPts = orbitHist.get(a.icao24) ?? []
+        oPts.push({ lat: a.lat, lon: a.lon })
+        if (oPts.length > 20) oPts.shift()
+        orbitHist.set(a.icao24, oPts)
       }
     }
     setTrails(new Map(hist))
@@ -136,6 +152,27 @@ export default function Dashboard() {
     if (newEvents.length > 0) setActivityLog(l => [...newEvents, ...l].slice(0, 50))
     prevSquawksRef.current = squawkAlerts.map(s => s.aircraft.icao24)
   }, [squawkAlerts])
+
+  // Orbit detection → activity log
+  const prevOrbitsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const prev = prevOrbitsRef.current
+    const newOrbits = orbits.filter(o => !prev.has(o.aircraft.icao24))
+    if (newOrbits.length > 0) {
+      setActivityLog(l => [
+        ...newOrbits.map(o => ({
+          type: 'ORBIT' as const,
+          message: `ISR Pattern — ${o.aircraft.callsign || o.aircraft.icao24.toUpperCase()} orbiting ~${o.radiusKm}km radius`,
+          time: new Date(),
+          color: '#a855f7',
+          lat: o.centerLat,
+          lon: o.centerLon,
+        })),
+        ...l,
+      ].slice(0, 50))
+    }
+    prevOrbitsRef.current = new Set(orbits.map(o => o.aircraft.icao24))
+  }, [orbits])
 
   // Speed anomaly detection
   useEffect(() => {
@@ -284,6 +321,18 @@ export default function Dashboard() {
           <span className="font-mono text-sm font-bold tracking-widest uppercase" style={{ color: 'var(--foreground)' }}>
             SKYVEIL
           </span>
+          {/* Threat score */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full"
+            style={{
+              background: `${threat.color}14`,
+              border: `1px solid ${threat.color}40`,
+              transition: 'all 0.6s ease',
+            }}>
+            <div className="w-1.5 h-1.5 rounded-full"
+              style={{ background: threat.color, boxShadow: `0 0 6px ${threat.color}`, animation: threat.score >= 40 ? 'pulse 1.5s infinite' : 'none' }} />
+            <span className="font-mono text-xs font-bold tabular-nums" style={{ color: threat.color }}>{threat.score}</span>
+            <span className="font-mono text-[9px] tracking-widest" style={{ color: threat.color }}>{threat.label}</span>
+          </div>
           {isDemo && (
             <span className="font-mono text-[9px] px-1.5 py-0.5 rounded tracking-widest"
               style={{ background: 'rgba(245,158,11,0.12)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.3)' }}>
@@ -303,6 +352,9 @@ export default function Dashboard() {
           )}
           {clusters.length > 0 && (
             <span style={{ color: 'var(--threat)' }}>⚠ {clusters.length} cluster{clusters.length > 1 ? 's' : ''}</span>
+          )}
+          {orbits.length > 0 && (
+            <span style={{ color: '#a855f7' }}>⊙ {orbits.length} ISR</span>
           )}
           <span style={{ color: statusColor }}>● {status.toUpperCase()}</span>
           {lastUpdate && <span style={{ color: 'var(--muted)' }}>{lastUpdate.toLocaleTimeString()}</span>}
@@ -399,6 +451,8 @@ export default function Dashboard() {
             notams={notams}
             clusters={clusters}
             formations={formations}
+            orbits={orbits}
+            threatPoints={threat.points}
             trails={trails}
             focusAircraft={selected}
             onAircraftSelect={setSelected}

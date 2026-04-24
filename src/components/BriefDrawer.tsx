@@ -26,7 +26,7 @@ function exportPDF(b: IntelBrief) {
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/\n/g, '<br>')
   w.document.write(`<!DOCTYPE html><html><head>
-    <title>COBALT-INTEL · ${b.region}</title>
+    <title>SKYVEIL · ${b.region}</title>
     <style>
       * { box-sizing: border-box; margin: 0; padding: 0; }
       body { font-family: 'Courier New', monospace; background: #fff; color: #1a1a1a; padding: 48px; max-width: 800px; }
@@ -41,13 +41,13 @@ function exportPDF(b: IntelBrief) {
     </style>
   </head><body>
     <div class="header">
-      <div class="title">COBALT-INTEL Brief <span class="level">${b.threatLevel}</span></div>
+      <div class="title">SKYVEIL Brief <span class="level">${b.threatLevel}</span></div>
       <div class="region">${b.region}</div>
       <div class="meta">Generated: ${new Date(b.generatedAt).toLocaleString()} · ID: ${b.id}</div>
     </div>
     <div class="body">${html}</div>
     ${b.sources.length > 0 ? `<div class="sources">OSINT Sources: ${b.sources.join(', ')}</div>` : ''}
-    <div class="footer">COBALT-INTEL — ADS-B + GDELT OSINT analysis · Unclassified</div>
+    <div class="footer">SKYVEIL — ADS-B + GDELT OSINT analysis · Unclassified</div>
   </body></html>`)
   w.document.close()
   w.print()
@@ -142,7 +142,7 @@ export default function BriefDrawer({ brief, history, loading, error, onClose }:
             : <div className="w-2 h-2 rounded-full" style={{ background: levelCol, boxShadow: `0 0 8px ${levelCol}` }} />
           }
           <span className="font-mono text-xs uppercase tracking-widest" style={{ color: 'var(--muted)' }}>
-            COBALT-INTEL
+            SKYVEIL
           </span>
         </div>
         <button

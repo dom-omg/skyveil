@@ -9,7 +9,7 @@ const SOURCES = [
 
 async function fetchRss(url: string, sourceName: string): Promise<OsintItem[]> {
   const res = await fetch(url, {
-    headers: { 'User-Agent': 'COBALT-INTEL/1.0' },
+    headers: { 'User-Agent': 'SKYVEIL/1.0' },
     signal: AbortSignal.timeout(5000),
   })
   const text = await res.text()

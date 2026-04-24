@@ -79,7 +79,7 @@ export default function BriefModal({ brief, history, loading, error, onClose }: 
               : <div className="w-2 h-2 rounded-full" style={{ background: levelCol, boxShadow: `0 0 8px ${levelCol}` }} />
             }
             <span className="font-mono text-xs uppercase tracking-widest" style={{ color: 'var(--muted)' }}>
-              COBALT-INTEL Brief
+              SKYVEIL Brief
             </span>
             {displayed && (
               <span className="font-mono text-xs font-bold uppercase" style={{ color: levelCol }}>
@@ -124,7 +124,7 @@ export default function BriefModal({ brief, history, loading, error, onClose }: 
               <div className="w-6 h-6 border-2 border-t-transparent rounded-full animate-spin"
                 style={{ borderColor: 'var(--accent)', borderTopColor: 'transparent' }} />
               <span className="font-mono text-xs animate-pulse" style={{ color: 'var(--accent)' }}>
-                Generating COBALT-INTEL brief…
+                Generating SKYVEIL brief…
               </span>
               <span className="font-mono text-xs" style={{ color: 'var(--muted)' }}>
                 ADS-B + OSINT → Claude Sonnet 4.6

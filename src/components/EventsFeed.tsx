@@ -32,7 +32,7 @@ function toneLabel(tone: number): string {
 }
 
 const TYPE_ICON: Record<ActivityEvent['type'], string> = {
-  CLUSTER: '⚠', FORMATION: '◈', SQUAWK: '⚡', BRIEF: '◎', ANOMALY: '↑',
+  CLUSTER: '⚠', FORMATION: '◈', SQUAWK: '⚡', BRIEF: '◎', ANOMALY: '↑', ORBIT: '⊙',
 }
 
 type Tab = 'INTEL' | 'ACTIVITY' | 'OSINT'

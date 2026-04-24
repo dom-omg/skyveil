@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { Aircraft, Ship, Notam } from '@/lib/types'
 import type { Cluster } from '@/lib/cluster'
 import type { Formation } from '@/lib/formation'
+import type { OrbitAircraft } from '@/lib/orbit'
+import type { ThreatPoint } from '@/lib/threat'
 
 export interface BriefTarget {
   lat: number
@@ -17,6 +19,8 @@ interface Props {
   notams: Notam[]
   clusters: Cluster[]
   formations: Formation[]
+  orbits: OrbitAircraft[]
+  threatPoints: ThreatPoint[]
   trails: Map<string, { lat: number; lon: number }[]>
   focusAircraft: Aircraft | null
   onAircraftSelect: (a: Aircraft) => void
@@ -61,8 +65,8 @@ function shipColor(type: Ship['type']): string {
 }
 
 export default function MapComponent({
-  aircraft, ships, notams, clusters, formations, trails, focusAircraft,
-  onAircraftSelect, onBriefRequest, briefTarget,
+  aircraft, ships, notams, clusters, formations, orbits, threatPoints,
+  trails, focusAircraft, onAircraftSelect, onBriefRequest, briefTarget,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -70,6 +74,7 @@ export default function MapComponent({
   const onBriefRef = useRef(onBriefRequest)
   const onSelectRef = useRef(onAircraftSelect)
   const aircraftMapRef = useRef<Map<string, Aircraft>>(new Map())
+  const orbitSetRef = useRef<Set<string>>(new Set())
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const countriesRef = useRef<any[]>([])
   const [textureIdx, setTextureIdx] = useState(0)
@@ -79,6 +84,9 @@ export default function MapComponent({
   useEffect(() => {
     aircraftMapRef.current = new Map(aircraft.map(a => [a.icao24, a]))
   }, [aircraft])
+  useEffect(() => {
+    orbitSetRef.current = new Set(orbits.map(o => o.aircraft.icao24))
+  }, [orbits])
 
   // Init globe
   useEffect(() => {
@@ -114,14 +122,36 @@ export default function MapComponent({
         globe.controls().autoRotate = false
       })
 
+      // Threat heatmap
+      globe
+        .heatmapsData([{ id: 'threat', points: [] as ThreatPoint[] }])
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .heatmapPoints((d: any) => d.points)
+        .heatmapPointLat((p: ThreatPoint) => p.lat)
+        .heatmapPointLng((p: ThreatPoint) => p.lon)
+        .heatmapPointWeight((p: ThreatPoint) => p.weight)
+        .heatmapBandwidth(4.5)
+        .heatmapColorFn(() => (t: number) => `rgba(${Math.round(255 * t)},${Math.round(30 * (1 - t))},0,${(t * 0.65).toFixed(2)})`)
+        .heatmapBaseAltitude(0)
+        .heatmapTopAltitude(0.04)
+        .heatmapsTransitionDuration(800)
+
       // Points
       globe
         .pointsData([])
         .pointLat((a: Aircraft) => a.lat)
         .pointLng((a: Aircraft) => a.lon)
-        .pointColor((a: Aircraft) => altColor(a.altitude))
+        .pointColor((a: Aircraft) => {
+          if (a.squawk && ['7500','7600','7700'].includes(a.squawk)) return '#ef4444'
+          if (orbitSetRef.current.has(a.icao24)) return '#a855f7'
+          return altColor(a.altitude)
+        })
         .pointAltitude(0.005)
-        .pointRadius((a: Aircraft) => a.squawk && ['7500','7600','7700'].includes(a.squawk) ? 0.7 : 0.35)
+        .pointRadius((a: Aircraft) => {
+          if (a.squawk && ['7500','7600','7700'].includes(a.squawk)) return 0.7
+          if (orbitSetRef.current.has(a.icao24)) return 0.5
+          return 0.35
+        })
         .pointsTransitionDuration(900)
         .pointLabel((a: Aircraft) => `
           <div style="background:rgba(9,9,11,0.97);border:1px solid rgba(0,230,118,0.25);border-radius:4px;padding:8px 12px;font-family:monospace;font-size:12px;color:#e2e8e2;min-width:165px;">
@@ -269,7 +299,19 @@ export default function MapComponent({
     globeRef.current.htmlElementsData(ships)
   }, [ships])
 
-  // Labels — clusters, formations, brief target, NOTAMs
+  // Threat heatmap
+  useEffect(() => {
+    if (!globeRef.current) return
+    globeRef.current.heatmapsData([{ id: 'threat', points: threatPoints }])
+  }, [threatPoints])
+
+  // Force re-render points when orbit set changes (to update colors/radius)
+  useEffect(() => {
+    if (!globeRef.current) return
+    globeRef.current.pointsData([...aircraft])
+  }, [orbits, aircraft])
+
+  // Labels — clusters, formations, brief target, NOTAMs, orbits
   useEffect(() => {
     if (!globeRef.current) return
     const labels = [
@@ -277,9 +319,10 @@ export default function MapComponent({
       ...formations.map(f => ({ lat: f.lat, lng: f.lon, text: `◈ FORMATION ×${f.aircraft.length}`, col: '#f59e0b' })),
       ...(briefTarget ? [{ lat: briefTarget.lat, lng: briefTarget.lon, text: '◎ BRIEF SECTOR', col: '#00e676' }] : []),
       ...notams.map(n => ({ lat: n.lat, lng: n.lon, text: `▣ ${n.type} ${n.id.replace('NOTAM-', '')}`, col: '#fb923c' })),
+      ...orbits.map(o => ({ lat: o.centerLat, lng: o.centerLon, text: `⊙ ISR ORBIT ~${o.radiusKm}km`, col: '#a855f7' })),
     ]
     globeRef.current.labelsData(labels)
-  }, [clusters, formations, briefTarget, notams])
+  }, [clusters, formations, briefTarget, notams, orbits])
 
   // Country tint by aircraft density
   useEffect(() => {
@@ -345,7 +388,11 @@ export default function MapComponent({
             <span style={{ color: 'var(--muted)' }}>{lbl}</span>
           </div>
         ))}
-        <div className="mt-1 pt-1 text-[10px]" style={{ borderTop: '1px solid var(--border)', color: 'var(--muted)' }}>
+        <div className="mt-1.5 pt-1.5 flex items-center gap-2 text-[10px]" style={{ borderTop: '1px solid var(--border)' }}>
+          <div className="w-2 h-2 rounded-full" style={{ background: '#a855f7', boxShadow: '0 0 4px #a855f7' }} />
+          <span style={{ color: 'var(--muted)' }}>ISR Orbit</span>
+        </div>
+        <div className="text-[10px]" style={{ color: 'var(--muted)' }}>
           ▣ NOTAM · — trails · → speed
         </div>
       </div>

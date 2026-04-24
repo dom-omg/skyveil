@@ -36,7 +36,7 @@ function parseGdeltDate(raw: string): string {
 function httpsGet(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
-      headers: { 'Accept': 'application/json', 'User-Agent': 'intel-dashboard/1.0' },
+      headers: { 'Accept': 'application/json', 'User-Agent': 'skyveil/1.0' },
     }, res => {
       const chunks: Buffer[] = []
       res.on('data', (c: Buffer) => chunks.push(c))

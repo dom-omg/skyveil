@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Intel Dashboard — Global Military & Conflict Tracker",
+  title: "SKYVEIL — Global Military & Conflict Tracker",
   description: "Real-time military aircraft, naval, and conflict intelligence. Open source.",
 };
 
