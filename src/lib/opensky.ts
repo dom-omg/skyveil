@@ -1,6 +1,6 @@
 import { Aircraft, StateVector } from './types'
 import { isMilitaryAircraft } from './military-filter'
-import { DEMO_AIRCRAFT } from './demo-data'
+import { getDemoAircraft } from './demo-data'
 
 const OPENSKY_BASE = 'https://opensky-network.org/api'
 
@@ -14,10 +14,12 @@ const g = globalThis as typeof globalThis & {
   _oskyCache: Aircraft[]
   _oskyCacheTime: number
   _oskyRateLimitedUntil: number
+  _isDemoMode: boolean
 }
 if (!g._oskyCache) g._oskyCache = []
 if (!g._oskyCacheTime) g._oskyCacheTime = 0
 if (!g._oskyRateLimitedUntil) g._oskyRateLimitedUntil = 0
+if (g._isDemoMode === undefined) g._isDemoMode = false
 
 export async function fetchAllAircraft(): Promise<Aircraft[]> {
   const res = await fetch(`${OPENSKY_BASE}/states/all`, {
@@ -77,16 +79,23 @@ export async function fetchMilitaryAircraft(): Promise<Aircraft[]> {
     const all = await fetchAllAircraft()
     g._oskyCache = all.filter(a => a.isMilitary && !a.onGround)
     g._oskyCacheTime = now
+    g._isDemoMode = false
     return g._oskyCache
   } catch (err) {
     if (g._oskyCache.length > 0) {
       console.warn('[opensky] fetch failed, serving stale cache from', new Date(g._oskyCacheTime).toISOString(), err)
+      g._isDemoMode = false
       return g._oskyCache
     }
     // No cache at all — serve demo data so the UI isn't empty
     console.warn('[opensky] no cache, falling back to demo data:', err)
-    return DEMO_AIRCRAFT
+    g._isDemoMode = true
+    return getDemoAircraft()
   }
+}
+
+export function isDemoMode(): boolean {
+  return g._isDemoMode ?? false
 }
 
 export function getCacheAge(): number {

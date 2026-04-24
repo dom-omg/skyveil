@@ -26,6 +26,7 @@ interface Props {
   onAircraftSelect: (a: Aircraft) => void
   onBriefRequest: (target: BriefTarget) => void
   briefTarget: BriefTarget | null
+  interceptPair?: [Aircraft, Aircraft]
 }
 
 const BRIEF_RADIUS_KM = 500
@@ -51,7 +52,7 @@ function hexToRgba(hex: string, alpha: number): string {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type GeoFeature = { properties: { ADMIN?: string; NAME?: string } }
-type ArcDatum = { sLat: number; sLng: number; eLat: number; eLng: number; col: string; isTrail: boolean }
+type ArcDatum = { sLat: number; sLng: number; eLat: number; eLng: number; col: string; isTrail: boolean; isIntercept?: boolean }
 
 function shipColor(type: Ship['type']): string {
   switch (type) {
@@ -66,7 +67,7 @@ function shipColor(type: Ship['type']): string {
 
 export default function MapComponent({
   aircraft, ships, notams, clusters, formations, orbits, threatPoints,
-  trails, focusAircraft, onAircraftSelect, onBriefRequest, briefTarget,
+  trails, focusAircraft, onAircraftSelect, onBriefRequest, briefTarget, interceptPair,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -179,10 +180,10 @@ export default function MapComponent({
         .arcEndLat((d: ArcDatum) => d.eLat)
         .arcEndLng((d: ArcDatum) => d.eLng)
         .arcColor((d: ArcDatum) => d.col)
-        .arcStroke((d: ArcDatum) => d.isTrail ? 0.2 : 0.4)
-        .arcDashLength((d: ArcDatum) => d.isTrail ? 1 : 0.5)
-        .arcDashGap((d: ArcDatum) => d.isTrail ? 0 : 0.15)
-        .arcDashAnimateTime((d: ArcDatum) => d.isTrail ? 0 : 1800)
+        .arcStroke((d: ArcDatum) => d.isIntercept ? 0.9 : d.isTrail ? 0.2 : 0.4)
+        .arcDashLength((d: ArcDatum) => d.isIntercept ? 0.35 : d.isTrail ? 1 : 0.5)
+        .arcDashGap((d: ArcDatum) => d.isIntercept ? 0.1 : d.isTrail ? 0 : 0.15)
+        .arcDashAnimateTime((d: ArcDatum) => d.isIntercept ? 500 : d.isTrail ? 0 : 1800)
         .arcAltitude((d: ArcDatum) => d.isTrail ? 0.001 : undefined)
         .arcsTransitionDuration(0)
 
@@ -290,8 +291,14 @@ export default function MapComponent({
       }
     })
 
-    globeRef.current.arcsData([...trailArcs, ...velArcs])
-  }, [aircraft, trails])
+    const interceptArcs: ArcDatum[] = interceptPair ? [{
+      sLat: interceptPair[0].lat, sLng: interceptPair[0].lon,
+      eLat: interceptPair[1].lat, eLng: interceptPair[1].lon,
+      col: 'rgba(255,102,0,0.9)', isTrail: false, isIntercept: true,
+    }] : []
+
+    globeRef.current.arcsData([...trailArcs, ...velArcs, ...interceptArcs])
+  }, [aircraft, trails, interceptPair])
 
   // Ships
   useEffect(() => {
@@ -353,7 +360,7 @@ export default function MapComponent({
       {/* Hint */}
       <div className="absolute top-3 left-1/2 -translate-x-1/2 rounded-full px-4 py-1.5 font-mono text-xs pointer-events-none"
         style={{ background: 'rgba(9,9,11,0.8)', border: '1px solid var(--border)', color: 'var(--muted)' }}>
-        Click → brief · Right-click → sector · B → centroid
+        Click → select · Right-click → brief · B → centroid · I → intercept · F → fullscreen
       </div>
 
       {/* Texture toggle */}

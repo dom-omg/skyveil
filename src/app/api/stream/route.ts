@@ -1,4 +1,4 @@
-import { fetchMilitaryAircraft, getCacheAge } from '@/lib/opensky'
+import { fetchMilitaryAircraft, getCacheAge, isDemoMode } from '@/lib/opensky'
 import { fetchConflictEvents } from '@/lib/gdelt'
 
 export const runtime = 'nodejs'
@@ -37,7 +37,7 @@ export async function GET() {
       }
 
       if (aircraft.length > 0) {
-        send('aircraft', { aircraft, timestamp: Date.now(), stale: false })
+        send('aircraft', { aircraft, timestamp: Date.now(), stale: false, demo: isDemoMode() })
       }
 
       // Load events (non-blocking — don't block aircraft on this)
@@ -50,7 +50,7 @@ export async function GET() {
         try {
           const fresh = await fetchMilitaryAircraft()
           const age = getCacheAge()
-          send('aircraft', { aircraft: fresh, timestamp: Date.now(), stale: age > 120_000 })
+          send('aircraft', { aircraft: fresh, timestamp: Date.now(), stale: age > 120_000, demo: isDemoMode() })
         } catch {
           // stream stays alive — client keeps last known state
         }

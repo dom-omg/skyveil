@@ -7,6 +7,7 @@ import { detectClusters, type Cluster } from '@/lib/cluster'
 import { detectFormations, detectSquawkEmergencies, type Formation } from '@/lib/formation'
 import { detectOrbits, type OrbitAircraft } from '@/lib/orbit'
 import { computeThreat, type ThreatAssessment } from '@/lib/threat'
+import { getDemoOrbitSeed, getDemoTrailSeed } from '@/lib/demo-data'
 import AircraftPanel from '@/components/AircraftPanel'
 import EventsFeed from '@/components/EventsFeed'
 import BriefDrawer from '@/components/BriefDrawer'
@@ -38,6 +39,32 @@ const MAX_HISTORY = 5
 const SPEED_ANOMALY_THRESHOLD = 60
 const MAX_TRAIL_POINTS = 6
 
+function computeIntercept(a: Aircraft, b: Aircraft) {
+  const R = 6371
+  const lat1 = (a.lat * Math.PI) / 180
+  const lat2 = (b.lat * Math.PI) / 180
+  const dLat = lat2 - lat1
+  const dLon = ((b.lon - a.lon) * Math.PI) / 180
+  const ha = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2
+  const distKm = R * 2 * Math.atan2(Math.sqrt(ha), Math.sqrt(1 - ha))
+  const y = Math.sin(dLon) * Math.cos(lat2)
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon)
+  const bearingDeg = ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360
+  const bRad = (bearingDeg * Math.PI) / 180
+  const ubx = Math.sin(bRad), uby = Math.cos(bRad)
+  const vAx = a.velocity * Math.sin((a.heading * Math.PI) / 180)
+  const vAy = a.velocity * Math.cos((a.heading * Math.PI) / 180)
+  const vBx = b.velocity * Math.sin((b.heading * Math.PI) / 180)
+  const vBy = b.velocity * Math.cos((b.heading * Math.PI) / 180)
+  const closingMs = (vAx - vBx) * ubx + (vAy - vBy) * uby
+  return {
+    distKm: Math.round(distKm),
+    bearingDeg: Math.round(bearingDeg),
+    closingKmh: Math.round(closingMs * 3.6),
+    etaMin: closingMs > 10 ? Math.round((distKm * 1000) / closingMs / 60) : null,
+  }
+}
+
 export default function Dashboard() {
   const [aircraft, setAircraft] = useState<Aircraft[]>([])
   const [events, setEvents] = useState<ConflictEvent[]>([])
@@ -45,6 +72,9 @@ export default function Dashboard() {
   const [status, setStatus] = useState<ConnectionState>('connecting')
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
   const [isDemo, setIsDemo] = useState(false)
+  const [fullscreen, setFullscreen] = useState(false)
+  const [interceptMode, setInterceptMode] = useState(false)
+  const [interceptTarget, setInterceptTarget] = useState<Aircraft | null>(null)
 
   // Brief state
   const [briefTarget, setBriefTarget] = useState<BriefTarget | null>(null)
@@ -74,6 +104,7 @@ export default function Dashboard() {
 
   // Orbit history — 20 points per aircraft for ISR detection
   const orbitHistRef = useRef<Map<string, { lat: number; lon: number }[]>>(new Map())
+  const demoSeededRef = useRef(false)
 
   // Speed anomalies
   const prevVelocityRef = useRef<Map<string, number>>(new Map())
@@ -101,6 +132,23 @@ export default function Dashboard() {
     () => computeThreat(clusters, formations, squawkAlerts, events, notams),
     [clusters, formations, squawkAlerts, events, notams]
   )
+
+  const handleSelect = useCallback((ac: Aircraft) => {
+    if (interceptMode && selected && ac.icao24 !== selected.icao24) {
+      setInterceptTarget(ac)
+      setInterceptMode(false)
+    } else {
+      setSelected(ac)
+      setInterceptTarget(null)
+    }
+  }, [interceptMode, selected])
+
+  const interceptPair = useMemo(() => {
+    if (!selected || !interceptTarget) return undefined
+    const a = aircraft.find(ac => ac.icao24 === selected.icao24) ?? selected
+    const b = aircraft.find(ac => ac.icao24 === interceptTarget.icao24) ?? interceptTarget
+    return [a, b] as [Aircraft, Aircraft]
+  }, [selected, interceptTarget, aircraft])
 
   // Trail history — accumulate position on every aircraft update
   useEffect(() => {
@@ -214,6 +262,15 @@ export default function Dashboard() {
         setLastUpdate(new Date())
         setIsDemo(!!data.demo)
         setStatus(data.stale ? 'reconnecting' : 'live')
+        if (data.demo && !demoSeededRef.current) {
+          demoSeededRef.current = true
+          const orbitSeed = getDemoOrbitSeed()
+          orbitHistRef.current.set(orbitSeed.icao24, orbitSeed.positions)
+          const trailSeed = getDemoTrailSeed()
+          for (const [icao24, pts] of trailSeed) {
+            trailsHistRef.current.set(icao24, pts)
+          }
+        }
       } catch { /* malformed */ }
     })
 
@@ -298,12 +355,21 @@ export default function Dashboard() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return
-      if (e.key === 'Escape') closeBrief()
+      if (e.key === 'Escape') {
+        closeBrief()
+        setInterceptMode(false)
+        setInterceptTarget(null)
+        setFullscreen(false)
+      }
       if (e.key === 'b' || e.key === 'B') briefCentroid()
+      if (e.key === 'f' || e.key === 'F') setFullscreen(v => !v)
+      if (e.key === 'i' || e.key === 'I') {
+        if (selected) setInterceptMode(v => !v)
+      }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [closeBrief, briefCentroid])
+  }, [closeBrief, briefCentroid, selected])
 
   const topCluster = clusters[0] ?? null
   const topSquawk = squawkAlerts[0] ?? null
@@ -432,12 +498,12 @@ export default function Dashboard() {
 
       {/* Layout */}
       <div className="flex flex-1 overflow-hidden">
-        <aside className="w-72 shrink-0 flex flex-col overflow-hidden" style={{ borderRight: '1px solid var(--border)' }}>
+        <aside className={`w-72 shrink-0 flex flex-col overflow-hidden${fullscreen ? ' hidden' : ''}`} style={{ borderRight: '1px solid var(--border)' }}>
           <div className="flex-1 overflow-hidden flex flex-col">
             <AircraftPanel
               aircraft={aircraft}
               selected={selected}
-              onSelect={setSelected}
+              onSelect={handleSelect}
               briefTarget={briefTarget}
             />
           </div>
@@ -455,11 +521,63 @@ export default function Dashboard() {
             threatPoints={threat.points}
             trails={trails}
             focusAircraft={selected}
-            onAircraftSelect={setSelected}
+            onAircraftSelect={handleSelect}
             onBriefRequest={handleBriefRequest}
             briefTarget={briefTarget}
+            interceptPair={interceptPair}
           />
           <NewsPlayer />
+
+          {/* Intercept mode banner */}
+          {interceptMode && (
+            <div className="absolute top-12 left-1/2 -translate-x-1/2 px-4 py-2 rounded font-mono text-xs animate-pulse pointer-events-none z-10"
+              style={{ background: 'rgba(255,102,0,0.15)', border: '1px solid rgba(255,102,0,0.5)', color: '#ff6600' }}>
+              ⊕ INTERCEPT MODE — click target aircraft
+            </div>
+          )}
+
+          {/* Intercept result panel */}
+          {interceptPair && (() => {
+            const ic = computeIntercept(interceptPair[0], interceptPair[1])
+            return (
+              <div className="absolute bottom-36 left-1/2 -translate-x-1/2 rounded px-4 py-3 font-mono text-xs z-10"
+                style={{ background: 'rgba(9,9,11,0.97)', border: '1px solid rgba(255,102,0,0.4)', minWidth: 260 }}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] uppercase tracking-widest" style={{ color: '#ff6600' }}>⊕ INTERCEPT CALC</span>
+                  <button onClick={() => { setInterceptTarget(null); setInterceptMode(false) }}
+                    className="font-mono text-xs" style={{ color: 'var(--muted)' }}>[×]</button>
+                </div>
+                <div className="flex gap-4 mb-2">
+                  <span style={{ color: 'var(--accent)' }}>{interceptPair[0].callsign || interceptPair[0].icao24.toUpperCase()}</span>
+                  <span style={{ color: 'var(--muted)' }}>→</span>
+                  <span style={{ color: '#ff6600' }}>{interceptPair[1].callsign || interceptPair[1].icao24.toUpperCase()}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-x-6 gap-y-1">
+                  <span style={{ color: 'var(--muted)' }}>Distance</span>
+                  <span style={{ color: 'var(--foreground)', fontWeight: 700 }}>{ic.distKm} km</span>
+                  <span style={{ color: 'var(--muted)' }}>Bearing</span>
+                  <span style={{ color: 'var(--foreground)', fontWeight: 700 }}>{ic.bearingDeg}°</span>
+                  <span style={{ color: 'var(--muted)' }}>Closing</span>
+                  <span style={{ color: ic.closingKmh > 0 ? '#ef4444' : '#f59e0b', fontWeight: 700 }}>
+                    {ic.closingKmh > 0 ? `${ic.closingKmh} km/h` : 'DIVERGING'}
+                  </span>
+                  <span style={{ color: 'var(--muted)' }}>ETA</span>
+                  <span style={{ color: '#ef4444', fontWeight: 700 }}>
+                    {ic.etaMin !== null ? `${ic.etaMin} min` : '—'}
+                  </span>
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* Fullscreen exit hint */}
+          {fullscreen && (
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded font-mono text-[10px] pointer-events-none"
+              style={{ background: 'rgba(9,9,11,0.7)', border: '1px solid var(--border)', color: 'var(--muted)' }}>
+              F / ESC → exit fullscreen
+            </div>
+          )}
+
           <div className="absolute bottom-4 left-4 rounded px-3 py-2 font-mono text-xs pointer-events-none"
             style={{ background: 'rgba(9,9,11,0.85)', border: '1px solid var(--border)', color: 'var(--muted)' }}>
             <div>Airborne <span style={{ color: 'var(--accent)', fontWeight: 700 }}>{aircraft.filter(a => !a.onGround).length}</span></div>
@@ -471,7 +589,7 @@ export default function Dashboard() {
           <BriefDrawer brief={brief} history={briefHistory} loading={briefLoading} error={briefError} onClose={closeBrief} />
         </main>
 
-        <aside className="w-80 shrink-0 flex flex-col overflow-hidden" style={{ borderLeft: '1px solid var(--border)' }}>
+        <aside className={`w-80 shrink-0 flex flex-col overflow-hidden${fullscreen ? ' hidden' : ''}`} style={{ borderLeft: '1px solid var(--border)' }}>
           <EventsFeed events={events} activities={activityLog} />
         </aside>
       </div>
