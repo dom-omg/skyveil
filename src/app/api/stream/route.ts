@@ -1,8 +1,10 @@
 import { fetchMilitaryAircraft, getCacheAge, isDemoMode } from '@/lib/opensky'
+import { getDemoOrbitSeed, getDemoTrailSeed } from '@/lib/demo-data'
 import { fetchConflictEvents } from '@/lib/gdelt'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
+export const maxDuration = 300
 
 export async function GET() {
   const encoder = new TextEncoder()
@@ -37,7 +39,12 @@ export async function GET() {
       }
 
       if (aircraft.length > 0) {
-        send('aircraft', { aircraft, timestamp: Date.now(), stale: false, demo: isDemoMode() })
+        const demo = isDemoMode()
+        const extra = demo ? {
+          orbitSeed: getDemoOrbitSeed(),
+          trailSeed: Array.from(getDemoTrailSeed().entries()).map(([icao24, pts]) => ({ icao24, pts })),
+        } : {}
+        send('aircraft', { aircraft, timestamp: Date.now(), stale: false, demo, ...extra })
       }
 
       // Load events (non-blocking — don't block aircraft on this)
