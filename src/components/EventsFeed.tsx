@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import type { ConflictEvent, OsintItem } from '@/lib/types'
-import type { ActivityEvent } from '@/app/page'
+import type { ActivityEvent } from '@/app/console/page'
 
 interface Props {
   events: ConflictEvent[]

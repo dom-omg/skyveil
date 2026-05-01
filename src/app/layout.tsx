@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "SKYVEIL — Global Military & Conflict Tracker",
-  description: "Real-time military aircraft, naval, and conflict intelligence. Open source.",
+  title: "SKYVEIL — Global Situational Awareness",
+  description: "Real-time global military, aerial, and maritime tracking. Open-source intelligence at operational tempo.",
 };
 
 export default function RootLayout({
@@ -23,11 +23,16 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
-    >
-      <body className="h-full flex flex-col overflow-hidden" style={{ background: 'var(--background)', color: 'var(--foreground)' }}>{children}</body>
+    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link
+          href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap"
+          rel="stylesheet"
+        />
+      </head>
+      <body>{children}</body>
     </html>
   );
 }

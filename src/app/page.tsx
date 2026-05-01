@@ -1,598 +1,608 @@
 'use client'
+import { useEffect, useRef, useState } from 'react'
+import './landing.css'
 
-import dynamic from 'next/dynamic'
-import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
-import type { Aircraft, ConflictEvent, IntelBrief, Ship, Notam } from '@/lib/types'
-import { detectClusters, type Cluster } from '@/lib/cluster'
-import { detectFormations, detectSquawkEmergencies, type Formation } from '@/lib/formation'
-import { detectOrbits, type OrbitAircraft } from '@/lib/orbit'
-import { computeThreat, type ThreatAssessment } from '@/lib/threat'
-import { getDemoOrbitSeed, getDemoTrailSeed } from '@/lib/demo-data'
-import AircraftPanel from '@/components/AircraftPanel'
-import EventsFeed from '@/components/EventsFeed'
-import BriefDrawer from '@/components/BriefDrawer'
-import LiveATC from '@/components/LiveATC'
-import NewsPlayer from '@/components/NewsPlayer'
-import type { BriefTarget } from '@/components/Map'
+const TICKER_ITEMS = [
+  { tag: 'CONTACT', cls: 'alert', text: 'RC-135V · ELINT · IONIAN SEA · FL310' },
+  { tag: 'AIS', cls: '', text: 'TANKER · IRGCN AOR · COURSE 087° · 13.2 kn' },
+  { tag: 'NOTAM', cls: 'amber', text: 'EUR/SAM · TRA-451 · ACTIVE 14:00–18:00Z' },
+  { tag: 'OSINT', cls: '', text: 'GDELT · ARTICLE CLUSTER +312% · BLACK SEA' },
+  { tag: 'TRACK', cls: '', text: 'E-3 SENTRY · ORBIT EAST POLAND · FL280' },
+  { tag: 'CONTACT', cls: 'alert', text: 'TU-95MS · COLD LAKE FIR · TRANSPONDER OFF' },
+  { tag: 'NAV', cls: '', text: 'CSG-12 · POSITION FIX · 36.2°N 30.8°E' },
+  { tag: 'NOTAM', cls: 'amber', text: 'PACIFIC · MISSILE TEST WINDOW · 72H' },
+  { tag: 'OSINT', cls: '', text: 'SAT IMAGERY · NEW EARTHWORKS · KALININGRAD' },
+  { tag: 'AIR', cls: '', text: 'F-35A · 4-SHIP · OFFUTT → RAMSTEIN · FL360' },
+  { tag: 'TRACK', cls: '', text: 'P-8A POSEIDON · BARENTS · 25,000ft' },
+  { tag: 'CONTACT', cls: 'alert', text: 'SU-24 · INTERCEPT · BALTIC SECTOR' },
+]
 
-const GlobeMap = dynamic(() => import('@/components/Map'), {
-  ssr: false,
-  loading: () => (
-    <div className="w-full h-full flex items-center justify-center" style={{ background: 'var(--background)' }}>
-      <span className="font-mono text-sm animate-pulse" style={{ color: 'var(--muted)' }}>Initializing globe…</span>
-    </div>
-  ),
-})
+const FEED_ITEMS = [
+  { cat: 'ALERT', cls: 'alert', text: 'Unscheduled scramble from Ämari AB. 4 × Eurofighter Typhoon climbing east-bound.', loc: 'BALTIC · 0421Z' },
+  { cat: 'CONTACT', cls: 'alert', text: 'RC-135V Rivet Joint entering AOR. Orbit pattern indicates ELINT collection.', loc: 'IONIAN · 0418Z' },
+  { cat: 'AIS', cls: '', text: 'Liberian-flagged tanker HUMANITY deviating from filed course. Heading 087°.', loc: 'PERSIAN GULF · 0414Z' },
+  { cat: 'NOTAM', cls: 'amber', text: 'Temporary restricted area TRA-451 activated. Live exercise window 14–18Z.', loc: 'NORTH SEA · 0411Z' },
+  { cat: 'OSINT', cls: '', text: 'GDELT cluster around Rostov-on-Don: 312% above 7-day baseline.', loc: 'GLOBAL · 0407Z' },
+  { cat: 'TRACK', cls: '', text: 'E-3 Sentry AWACS established orbit east of Warsaw. FL280, holding.', loc: 'POLAND · 0403Z' },
+  { cat: 'NAV', cls: '', text: 'Carrier strike group CSG-12 position confirmed. Speed 21 kn, course 195°.', loc: 'EAST MED · 0359Z' },
+  { cat: 'CONTACT', cls: 'alert', text: 'Tu-95MS bear formation tracked off Alaska ADIZ. F-22 intercept airborne.', loc: 'BERING · 0354Z' },
+]
 
-type ConnectionState = 'connecting' | 'live' | 'error' | 'reconnecting'
+function pad(n: number) { return n < 10 ? '0' + n : '' + n }
+function fmt(n: number) { return n.toLocaleString('en-US') }
 
-export interface ActivityEvent {
-  type: 'CLUSTER' | 'FORMATION' | 'SQUAWK' | 'BRIEF' | 'ANOMALY' | 'ORBIT'
-  message: string
-  time: Date
-  color: string
-  lat?: number
-  lon?: number
-}
+export default function LandingPage() {
+  const [utcDisplay, setUtcDisplay] = useState('— UTC')
+  const [consoleTime, setConsoleTime] = useState('— UTC')
+  const [consoleFrame, setConsoleFrame] = useState('——:——Z')
+  const [tracks, setTracks] = useState({ air: 12847, nav: 3412, not: 1209, evt: 8664, console: 2184 })
+  const [radarPing, setRadarPing] = useState(42)
+  const [feedIdx, setFeedIdx] = useState(0)
+  const [submitted, setSubmitted] = useState(false)
+  const sweepRef = useRef<SVGGElement | null>(null)
+  const rafRef = useRef<number>(0)
+  const angleRef = useRef(0)
 
-const MAX_HISTORY = 5
-const SPEED_ANOMALY_THRESHOLD = 60
-const MAX_TRAIL_POINTS = 6
-
-function computeIntercept(a: Aircraft, b: Aircraft) {
-  const R = 6371
-  const lat1 = (a.lat * Math.PI) / 180
-  const lat2 = (b.lat * Math.PI) / 180
-  const dLat = lat2 - lat1
-  const dLon = ((b.lon - a.lon) * Math.PI) / 180
-  const ha = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2
-  const distKm = R * 2 * Math.atan2(Math.sqrt(ha), Math.sqrt(1 - ha))
-  const y = Math.sin(dLon) * Math.cos(lat2)
-  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon)
-  const bearingDeg = ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360
-  const bRad = (bearingDeg * Math.PI) / 180
-  const ubx = Math.sin(bRad), uby = Math.cos(bRad)
-  const vAx = a.velocity * Math.sin((a.heading * Math.PI) / 180)
-  const vAy = a.velocity * Math.cos((a.heading * Math.PI) / 180)
-  const vBx = b.velocity * Math.sin((b.heading * Math.PI) / 180)
-  const vBy = b.velocity * Math.cos((b.heading * Math.PI) / 180)
-  const closingMs = (vAx - vBx) * ubx + (vAy - vBy) * uby
-  return {
-    distKm: Math.round(distKm),
-    bearingDeg: Math.round(bearingDeg),
-    closingKmh: Math.round(closingMs * 3.6),
-    etaMin: closingMs > 10 ? Math.round((distKm * 1000) / closingMs / 60) : null,
-  }
-}
-
-export default function Dashboard() {
-  const [aircraft, setAircraft] = useState<Aircraft[]>([])
-  const [events, setEvents] = useState<ConflictEvent[]>([])
-  const [selected, setSelected] = useState<Aircraft | null>(null)
-  const [status, setStatus] = useState<ConnectionState>('connecting')
-  const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
-  const [isDemo, setIsDemo] = useState(false)
-  const [fullscreen, setFullscreen] = useState(false)
-  const [interceptMode, setInterceptMode] = useState(false)
-  const [interceptTarget, setInterceptTarget] = useState<Aircraft | null>(null)
-
-  // Brief state
-  const [briefTarget, setBriefTarget] = useState<BriefTarget | null>(null)
-  const [brief, setBrief] = useState<IntelBrief | null>(null)
-  const [briefHistory, setBriefHistory] = useState<IntelBrief[]>([])
-  const [briefLoading, setBriefLoading] = useState(false)
-  const [briefError, setBriefError] = useState<string | null>(null)
-
-  // Alert dismissal
-  const [clusterAlertDismissed, setClusterAlertDismissed] = useState(false)
-  const [squawkAlertDismissed, setSquawkAlertDismissed] = useState(false)
-  const [formationAlertDismissed, setFormationAlertDismissed] = useState(false)
-
-  // Flight trails
-  const trailsHistRef = useRef<Map<string, { lat: number; lon: number }[]>>(new Map())
-  const [trails, setTrails] = useState<Map<string, { lat: number; lon: number }[]>>(new Map())
-
-  // Activity log
-  const [activityLog, setActivityLog] = useState<ActivityEvent[]>([])
-  const prevClustersRef = useRef<Cluster[]>([])
-  const prevFormationsRef = useRef<Formation[]>([])
-  const prevSquawksRef = useRef<string[]>([])
-
-  // Ships + NOTAMs
-  const [ships, setShips] = useState<Ship[]>([])
-  const [notams, setNotams] = useState<Notam[]>([])
-
-  // Orbit history — 20 points per aircraft for ISR detection
-  const orbitHistRef = useRef<Map<string, { lat: number; lon: number }[]>>(new Map())
-  const demoSeededRef = useRef(false)
-
-  // Speed anomalies
-  const prevVelocityRef = useRef<Map<string, number>>(new Map())
-  const [speedAnomalies, setSpeedAnomalies] = useState<{ callsign: string; delta: number }[]>([])
-
-  const esRef = useRef<EventSource | null>(null)
-  const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const aircraftRef = useRef<Aircraft[]>([])
-  const eventsRef = useRef<ConflictEvent[]>([])
-
-  useEffect(() => { aircraftRef.current = aircraft }, [aircraft])
-  useEffect(() => { eventsRef.current = events }, [events])
-
-  // Fetch ships and NOTAMs once on mount
   useEffect(() => {
-    fetch('/api/ships').then(r => r.json()).then((d: { ships: Ship[] }) => setShips(d.ships)).catch(() => {})
-    fetch('/api/notams').then(r => r.json()).then((d: { notams: Notam[] }) => setNotams(d.notams)).catch(() => {})
+    function tick() {
+      const d = new Date()
+      const t = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`
+      const date = `${d.getUTCFullYear()}.${pad(d.getUTCMonth() + 1)}.${pad(d.getUTCDate())}`
+      setUtcDisplay(`${date} · ${t} UTC`)
+      setConsoleTime(`${t} UTC`)
+      setConsoleFrame(`${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}Z`)
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
   }, [])
 
-  const clusters: Cluster[] = useMemo(() => detectClusters(aircraft), [aircraft])
-  const formations: Formation[] = useMemo(() => detectFormations(aircraft), [aircraft])
-  const squawkAlerts = useMemo(() => detectSquawkEmergencies(aircraft), [aircraft])
-  const orbits: OrbitAircraft[] = useMemo(() => detectOrbits(aircraft, orbitHistRef.current), [aircraft])
-  const threat: ThreatAssessment = useMemo(
-    () => computeThreat(clusters, formations, squawkAlerts, events, notams),
-    [clusters, formations, squawkAlerts, events, notams]
-  )
-
-  const handleSelect = useCallback((ac: Aircraft) => {
-    if (interceptMode && selected && ac.icao24 !== selected.icao24) {
-      setInterceptTarget(ac)
-      setInterceptMode(false)
-    } else {
-      setSelected(ac)
-      setInterceptTarget(null)
-    }
-  }, [interceptMode, selected])
-
-  const interceptPair = useMemo(() => {
-    if (!selected || !interceptTarget) return undefined
-    const a = aircraft.find(ac => ac.icao24 === selected.icao24) ?? selected
-    const b = aircraft.find(ac => ac.icao24 === interceptTarget.icao24) ?? interceptTarget
-    return [a, b] as [Aircraft, Aircraft]
-  }, [selected, interceptTarget, aircraft])
-
-  // Trail history — accumulate position on every aircraft update
   useEffect(() => {
-    const hist = trailsHistRef.current
-    const orbitHist = orbitHistRef.current
-    for (const a of aircraft) {
-      const pts = hist.get(a.icao24) ?? []
-      const last = pts[pts.length - 1]
-      if (!last || last.lat !== a.lat || last.lon !== a.lon) {
-        pts.push({ lat: a.lat, lon: a.lon })
-        if (pts.length > MAX_TRAIL_POINTS) pts.shift()
-        hist.set(a.icao24, pts)
-        // Orbit history keeps 20 points
-        const oPts = orbitHist.get(a.icao24) ?? []
-        oPts.push({ lat: a.lat, lon: a.lon })
-        if (oPts.length > 20) oPts.shift()
-        orbitHist.set(a.icao24, oPts)
-      }
-    }
-    setTrails(new Map(hist))
-  }, [aircraft])
-
-  // Activity log — detect NEW events each cycle
-  useEffect(() => {
-    const newEvents: ActivityEvent[] = []
-    const prevClusterKeys = new Set(prevClustersRef.current.map(c => `${c.country}-${c.count}`))
-    clusters
-      .filter(c => !prevClusterKeys.has(`${c.country}-${c.count}`))
-      .forEach(c => newEvents.push({ type: 'CLUSTER', message: `Cluster — ${c.country} ×${c.count} aircraft`, time: new Date(), color: '#ef4444', lat: c.lat, lon: c.lon }))
-    prevClustersRef.current = clusters
-  }, [clusters])
-
-  useEffect(() => {
-    const newEvents: ActivityEvent[] = []
-    const prevFormKeys = new Set(prevFormationsRef.current.map(f => `${f.country}-${f.aircraft.length}`))
-    formations
-      .filter(f => !prevFormKeys.has(`${f.country}-${f.aircraft.length}`))
-      .forEach(f => newEvents.push({ type: 'FORMATION', message: `Formation — ${f.country} ×${f.aircraft.length} · hdg ${Math.round(f.heading)}°`, time: new Date(), color: '#f59e0b', lat: f.lat, lon: f.lon }))
-    if (newEvents.length > 0) setActivityLog(l => [...newEvents, ...l].slice(0, 50))
-    prevFormationsRef.current = formations
-  }, [formations])
-
-  useEffect(() => {
-    const newEvents: ActivityEvent[] = []
-    const prevIcaos = new Set(prevSquawksRef.current)
-    squawkAlerts
-      .filter(s => !prevIcaos.has(s.aircraft.icao24))
-      .forEach(s => newEvents.push({ type: 'SQUAWK', message: `${s.label} — ${s.aircraft.callsign || s.aircraft.icao24.toUpperCase()} (${s.aircraft.squawk})`, time: new Date(), color: '#ef4444', lat: s.aircraft.lat, lon: s.aircraft.lon }))
-    if (newEvents.length > 0) setActivityLog(l => [...newEvents, ...l].slice(0, 50))
-    prevSquawksRef.current = squawkAlerts.map(s => s.aircraft.icao24)
-  }, [squawkAlerts])
-
-  // Orbit detection → activity log
-  const prevOrbitsRef = useRef<Set<string>>(new Set())
-  useEffect(() => {
-    const prev = prevOrbitsRef.current
-    const newOrbits = orbits.filter(o => !prev.has(o.aircraft.icao24))
-    if (newOrbits.length > 0) {
-      setActivityLog(l => [
-        ...newOrbits.map(o => ({
-          type: 'ORBIT' as const,
-          message: `ISR Pattern — ${o.aircraft.callsign || o.aircraft.icao24.toUpperCase()} orbiting ~${o.radiusKm}km radius`,
-          time: new Date(),
-          color: '#a855f7',
-          lat: o.centerLat,
-          lon: o.centerLon,
-        })),
-        ...l,
-      ].slice(0, 50))
-    }
-    prevOrbitsRef.current = new Set(orbits.map(o => o.aircraft.icao24))
-  }, [orbits])
-
-  // Speed anomaly detection
-  useEffect(() => {
-    const prev = prevVelocityRef.current
-    const anomalies = aircraft
-      .filter(a => {
-        const p = prev.get(a.icao24)
-        return p !== undefined && Math.abs(a.velocity - p) > SPEED_ANOMALY_THRESHOLD
-      })
-      .map(a => ({
-        callsign: a.callsign || a.icao24.toUpperCase(),
-        delta: Math.round((a.velocity - (prev.get(a.icao24) ?? a.velocity)) * 3.6),
+    const id = setInterval(() => {
+      setTracks(p => ({
+        air: p.air + Math.floor((Math.random() - 0.5) * 16),
+        nav: p.nav + Math.floor((Math.random() - 0.5) * 8),
+        not: p.not + Math.floor((Math.random() - 0.5) * 4),
+        evt: p.evt + Math.floor((Math.random() - 0.5) * 10),
+        console: p.console + Math.floor((Math.random() - 0.5) * 6),
       }))
-    if (anomalies.length > 0) {
-      setSpeedAnomalies(anomalies.slice(0, 3))
-      setActivityLog(l => [
-        ...anomalies.slice(0, 2).map(a => ({
-          type: 'ANOMALY' as const,
-          message: `Speed Δ — ${a.callsign} ${a.delta > 0 ? '+' : ''}${a.delta} km/h`,
-          time: new Date(),
-          color: '#00e676',
-        })),
-        ...l,
-      ].slice(0, 50))
+      setRadarPing(38 + Math.floor(Math.random() * 12))
+    }, 1800)
+    return () => clearInterval(id)
+  }, [])
+
+  useEffect(() => {
+    function animate() {
+      angleRef.current = (angleRef.current + 0.6) % 360
+      if (sweepRef.current) {
+        sweepRef.current.style.transform = `rotate(${angleRef.current}deg)`
+        sweepRef.current.style.transformOrigin = '270px 270px'
+      }
+      rafRef.current = requestAnimationFrame(animate)
     }
-    for (const a of aircraft) prev.set(a.icao24, a.velocity)
-  }, [aircraft])
+    rafRef.current = requestAnimationFrame(animate)
+    return () => cancelAnimationFrame(rafRef.current)
+  }, [])
 
-  const connect = useCallback(() => {
-    if (esRef.current) { esRef.current.close(); esRef.current = null }
-    setStatus('connecting')
-    const es = new EventSource('/api/stream')
-    esRef.current = es
+  useEffect(() => {
+    const id = setInterval(() => setFeedIdx(p => (p + 1) % FEED_ITEMS.length), 4000)
+    return () => clearInterval(id)
+  }, [])
 
-    es.addEventListener('aircraft', (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data) as { aircraft: Aircraft[]; stale?: boolean; demo?: boolean }
-        setAircraft(data.aircraft)
-        setLastUpdate(new Date())
-        setIsDemo(!!data.demo)
-        setStatus(data.stale ? 'reconnecting' : 'live')
-        if (data.demo && !demoSeededRef.current) {
-          demoSeededRef.current = true
-          const orbitSeed = getDemoOrbitSeed()
-          orbitHistRef.current.set(orbitSeed.icao24, orbitSeed.positions)
-          const trailSeed = getDemoTrailSeed()
-          for (const [icao24, pts] of trailSeed) {
-            trailsHistRef.current.set(icao24, pts)
-          }
+  useEffect(() => {
+    const elems = document.querySelectorAll<HTMLElement>('[data-count-target]')
+    const obs = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return
+        const el = entry.target as HTMLElement
+        const target = parseInt(el.dataset.countTarget || '0', 10)
+        const large = target > 1000
+        const duration = 1600
+        const start = performance.now()
+        const step = (now: number) => {
+          const t = Math.min(1, (now - start) / duration)
+          const eased = 1 - Math.pow(1 - t, 3)
+          el.textContent = large ? Math.floor(target * eased).toLocaleString('en-US') : Math.floor(target * eased).toString()
+          if (t < 1) requestAnimationFrame(step)
         }
-      } catch { /* malformed */ }
-    })
-
-    es.addEventListener('events', (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data) as { events: ConflictEvent[] }
-        setEvents(data.events)
-      } catch { /* malformed */ }
-    })
-
-    es.addEventListener('status', (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data) as { message: string }
-        console.warn('[stream]', data.message)
-        setStatus('error')
-      } catch { /* malformed */ }
-    })
-
-    es.onerror = () => {
-      es.close()
-      esRef.current = null
-      setStatus('reconnecting')
-      retryRef.current = setTimeout(() => connect(), 15_000)
-    }
-  }, [])
-
-  useEffect(() => {
-    connect()
-    return () => {
-      esRef.current?.close()
-      if (retryRef.current) clearTimeout(retryRef.current)
-    }
-  }, [connect])
-
-  const handleBriefRequest = useCallback(async (target: BriefTarget) => {
-    setBriefTarget(target)
-    setBriefError(null)
-    setBriefLoading(true)
-    setBrief(prev => {
-      if (prev) setBriefHistory(h => [prev, ...h].slice(0, MAX_HISTORY))
-      return null
-    })
-    try {
-      const res = await fetch('/api/brief', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...target, aircraft: aircraftRef.current, events: eventsRef.current }),
+        requestAnimationFrame(step)
+        obs.unobserve(el)
       })
-      const data = await res.json() as { brief?: IntelBrief; error?: string }
-      if (!res.ok || data.error) throw new Error(data.error ?? 'Brief generation failed')
-      setBrief(data.brief ?? null)
-      if (data.brief) {
-        setActivityLog(l => [{
-          type: 'BRIEF' as const,
-          message: `Brief — ${data.brief!.region} [${data.brief!.threatLevel}]`,
-          time: new Date(),
-          color: '#00e676',
-        }, ...l].slice(0, 50))
-      }
-    } catch (err) {
-      setBriefError(err instanceof Error ? err.message : 'Unknown error')
-    } finally {
-      setBriefLoading(false)
-    }
+    }, { threshold: 0.4 })
+    elems.forEach(el => obs.observe(el))
+    return () => obs.disconnect()
   }, [])
 
-  const closeBrief = useCallback(() => {
-    setBrief(null)
-    setBriefError(null)
-    setBriefTarget(null)
-    setBriefLoading(false)
-  }, [])
-
-  const briefCentroid = useCallback(() => {
-    const ac = aircraftRef.current.filter(a => !a.onGround)
-    if (ac.length === 0) return
-    const lat = ac.reduce((s, a) => s + a.lat, 0) / ac.length
-    const lon = ac.reduce((s, a) => s + a.lon, 0) / ac.length
-    handleBriefRequest({ lat, lon, radiusKm: 500 })
-  }, [handleBriefRequest])
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return
-      if (e.key === 'Escape') {
-        closeBrief()
-        setInterceptMode(false)
-        setInterceptTarget(null)
-        setFullscreen(false)
-      }
-      if (e.key === 'b' || e.key === 'B') briefCentroid()
-      if (e.key === 'f' || e.key === 'F') setFullscreen(v => !v)
-      if (e.key === 'i' || e.key === 'I') {
-        if (selected) setInterceptMode(v => !v)
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [closeBrief, briefCentroid, selected])
-
-  const topCluster = clusters[0] ?? null
-  const topSquawk = squawkAlerts[0] ?? null
-  const topFormation = formations[0] ?? null
-
-  const statusColor = status === 'live' ? 'var(--accent)' : status === 'reconnecting' ? '#f59e0b' : 'var(--threat)'
+  const visibleFeed = Array.from({ length: 5 }, (_, i) => FEED_ITEMS[(feedIdx + i) % FEED_ITEMS.length])
+  const tickerDouble = [...TICKER_ITEMS, ...TICKER_ITEMS]
 
   return (
-    <div className="h-screen w-screen flex flex-col overflow-hidden" style={{ background: 'var(--background)' }}>
-      {/* Header */}
-      <header className="flex items-center justify-between px-6 py-3 z-10 shrink-0"
-        style={{ borderBottom: '1px solid var(--border)', background: 'rgba(9,9,11,0.95)', backdropFilter: 'blur(8px)' }}>
-        <div className="flex items-center gap-3">
-          <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--accent)', boxShadow: '0 0 8px var(--accent)' }} />
-          <span className="font-mono text-sm font-bold tracking-widest uppercase" style={{ color: 'var(--foreground)' }}>
+    <div className="landing-root">
+      <div className="l-grain" />
+
+      {/* CLASSIFICATION */}
+      <div className="l-classification">
+        <div className="l-classification__inner">
+          <div className="l-classification__side">
+            <span>OFFICIAL · OSINT</span>
+            <span>{utcDisplay}</span>
+          </div>
+          <div className="l-classification__center">
+            <span className="l-classification__dot" />
+            <span>SKYVEIL // OPERATIONAL // RT FEED ACTIVE</span>
+            <span className="l-classification__dot" />
+          </div>
+          <div className="l-classification__side">
+            <span>BUILD v2.41.07</span>
+            <span>UNCLASSIFIED</span>
+          </div>
+        </div>
+      </div>
+
+      {/* NAV */}
+      <nav className="l-nav">
+        <div className="l-nav__inner">
+          <a href="#" className="l-nav__brand">
+            <svg className="l-nav__mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M2 12h20M12 2c2.5 3 4 6.5 4 10s-1.5 7-4 10c-2.5-3-4-6.5-4-10s1.5-7 4-10z"/>
+              <circle cx="12" cy="12" r="2.5" fill="currentColor"/>
+            </svg>
             SKYVEIL
-          </span>
-          {/* Threat score */}
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full"
-            style={{
-              background: `${threat.color}14`,
-              border: `1px solid ${threat.color}40`,
-              transition: 'all 0.6s ease',
-            }}>
-            <div className="w-1.5 h-1.5 rounded-full"
-              style={{ background: threat.color, boxShadow: `0 0 6px ${threat.color}`, animation: threat.score >= 40 ? 'pulse 1.5s infinite' : 'none' }} />
-            <span className="font-mono text-xs font-bold tabular-nums" style={{ color: threat.color }}>{threat.score}</span>
-            <span className="font-mono text-[9px] tracking-widest" style={{ color: threat.color }}>{threat.label}</span>
+          </a>
+          <div className="l-nav__links">
+            <a className="l-nav__link" href="#capabilities"><span className="l-num">01</span>Capabilities</a>
+            <a className="l-nav__link" href="#console"><span className="l-num">02</span>Console</a>
+            <a className="l-nav__link" href="#coverage"><span className="l-num">03</span>Coverage</a>
+            <a className="l-nav__link" href="#sources"><span className="l-num">04</span>Sources</a>
+            <a className="l-nav__link" href="#access"><span className="l-num">05</span>Access</a>
           </div>
-          {isDemo && (
-            <span className="font-mono text-[9px] px-1.5 py-0.5 rounded tracking-widest"
-              style={{ background: 'rgba(245,158,11,0.12)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.3)' }}>
-              DEMO
-            </span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-4 text-xs font-mono">
-          {squawkAlerts.length > 0 && (
-            <span className="animate-pulse font-bold" style={{ color: '#ef4444' }}>
-              ⚡ {squawkAlerts.length} EMERGENCY
-            </span>
-          )}
-          {formations.length > 0 && (
-            <span style={{ color: '#f59e0b' }}>◈ {formations.length} formation{formations.length > 1 ? 's' : ''}</span>
-          )}
-          {clusters.length > 0 && (
-            <span style={{ color: 'var(--threat)' }}>⚠ {clusters.length} cluster{clusters.length > 1 ? 's' : ''}</span>
-          )}
-          {orbits.length > 0 && (
-            <span style={{ color: '#a855f7' }}>⊙ {orbits.length} ISR</span>
-          )}
-          <span style={{ color: statusColor }}>● {status.toUpperCase()}</span>
-          {lastUpdate && <span style={{ color: 'var(--muted)' }}>{lastUpdate.toLocaleTimeString()}</span>}
-          <span style={{ color: 'var(--muted)' }}>{aircraft.length} AC · {ships.length} NAV · {events.length} EVT</span>
-        </div>
-      </header>
-
-      {/* Priority banners */}
-      {topSquawk && !squawkAlertDismissed && (
-        <div className="shrink-0 px-6 py-2 flex items-center justify-between animate-pulse"
-          style={{ borderBottom: '1px solid rgba(239,68,68,0.4)', background: 'rgba(239,68,68,0.1)' }}>
-          <div className="flex items-center gap-3 text-xs font-mono">
-            <div className="w-1.5 h-1.5 rounded-full" style={{ background: '#ef4444' }} />
-            <span style={{ color: '#fca5a5', fontWeight: 700 }}>⚡ SQUAWK {topSquawk.aircraft.squawk} — {topSquawk.label}</span>
-            <span style={{ color: '#fca5a5' }}>{topSquawk.aircraft.callsign || topSquawk.aircraft.icao24.toUpperCase()} · {topSquawk.aircraft.country}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={() => handleBriefRequest({ lat: topSquawk.aircraft.lat, lon: topSquawk.aircraft.lon, radiusKm: 300 })}
-              className="text-xs font-mono px-3 py-1 rounded"
-              style={{ border: '1px solid rgba(239,68,68,0.5)', color: '#fca5a5', background: 'rgba(239,68,68,0.12)' }}>
-              Brief →
-            </button>
-            <button onClick={() => setSquawkAlertDismissed(true)} className="font-mono text-xs" style={{ color: 'var(--muted)' }}>[×]</button>
+          <div className="l-nav__cta">
+            <a href="/console" className="l-nav__pill">Live Globe ↗</a>
+            <a href="#access" className="l-btn">
+              Request Access
+              <svg className="l-btn__arrow" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M1 5h8M5 1l4 4-4 4"/>
+              </svg>
+            </a>
           </div>
         </div>
-      )}
+      </nav>
 
-      {topFormation && !formationAlertDismissed && !topSquawk && (
-        <div className="shrink-0 px-6 py-2 flex items-center justify-between"
-          style={{ borderBottom: '1px solid rgba(245,158,11,0.2)', background: 'rgba(245,158,11,0.05)' }}>
-          <div className="flex items-center gap-3 text-xs font-mono">
-            <div className="w-1.5 h-1.5 rounded-full" style={{ background: '#f59e0b' }} />
-            <span style={{ color: '#fcd34d' }}>FORMATION — {topFormation.country} ×{topFormation.aircraft.length} · hdg {Math.round(topFormation.heading)}°</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={() => handleBriefRequest({ lat: topFormation.lat, lon: topFormation.lon, radiusKm: 300 })}
-              className="text-xs font-mono px-3 py-1 rounded"
-              style={{ border: '1px solid rgba(245,158,11,0.4)', color: '#fcd34d', background: 'rgba(245,158,11,0.08)' }}>
-              Brief →
-            </button>
-            <button onClick={() => setFormationAlertDismissed(true)} className="font-mono text-xs" style={{ color: 'var(--muted)' }}>[×]</button>
-          </div>
-        </div>
-      )}
+      <main className="l-main">
 
-      {topCluster && !clusterAlertDismissed && !topSquawk && !topFormation && (
-        <div className="shrink-0 px-6 py-2 flex items-center justify-between"
-          style={{ borderBottom: '1px solid rgba(239,68,68,0.2)', background: 'rgba(239,68,68,0.05)' }}>
-          <div className="flex items-center gap-3 text-xs font-mono">
-            <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--threat)' }} />
-            <span style={{ color: '#fca5a5' }}>CLUSTER — {topCluster.country} · {topCluster.count} aircraft within 300km</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={() => handleBriefRequest({ lat: topCluster.lat, lon: topCluster.lon, radiusKm: 500 })}
-              className="text-xs font-mono px-3 py-1 rounded"
-              style={{ border: '1px solid rgba(239,68,68,0.4)', color: '#fca5a5', background: 'rgba(239,68,68,0.08)' }}>
-              Generate brief →
-            </button>
-            <button onClick={() => setClusterAlertDismissed(true)} className="font-mono text-xs" style={{ color: 'var(--muted)' }}>[×]</button>
-          </div>
-        </div>
-      )}
-
-      {speedAnomalies.length > 0 && (
-        <div className="shrink-0 px-6 py-1.5 flex items-center gap-4"
-          style={{ borderBottom: '1px solid rgba(0,230,118,0.1)', background: 'rgba(0,230,118,0.03)' }}>
-          <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: 'var(--muted)' }}>Speed Δ</span>
-          {speedAnomalies.map((a, i) => (
-            <span key={i} className="text-[10px] font-mono" style={{ color: 'var(--accent)' }}>
-              {a.callsign} {a.delta > 0 ? '+' : ''}{a.delta} km/h
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Layout */}
-      <div className="flex flex-1 overflow-hidden">
-        <aside className={`w-72 shrink-0 flex flex-col overflow-hidden${fullscreen ? ' hidden' : ''}`} style={{ borderRight: '1px solid var(--border)' }}>
-          <div className="flex-1 overflow-hidden flex flex-col">
-            <AircraftPanel
-              aircraft={aircraft}
-              selected={selected}
-              onSelect={handleSelect}
-              briefTarget={briefTarget}
-            />
-          </div>
-          <LiveATC selected={selected} />
-        </aside>
-
-        <main className="flex-1 relative overflow-hidden">
-          <GlobeMap
-            aircraft={aircraft}
-            ships={ships}
-            notams={notams}
-            clusters={clusters}
-            formations={formations}
-            orbits={orbits}
-            threatPoints={threat.points}
-            trails={trails}
-            focusAircraft={selected}
-            onAircraftSelect={handleSelect}
-            onBriefRequest={handleBriefRequest}
-            briefTarget={briefTarget}
-            interceptPair={interceptPair}
-          />
-          <NewsPlayer />
-
-          {/* Intercept mode banner */}
-          {interceptMode && (
-            <div className="absolute top-12 left-1/2 -translate-x-1/2 px-4 py-2 rounded font-mono text-xs animate-pulse pointer-events-none z-10"
-              style={{ background: 'rgba(255,102,0,0.15)', border: '1px solid rgba(255,102,0,0.5)', color: '#ff6600' }}>
-              ⊕ INTERCEPT MODE — click target aircraft
-            </div>
-          )}
-
-          {/* Intercept result panel */}
-          {interceptPair && (() => {
-            const ic = computeIntercept(interceptPair[0], interceptPair[1])
-            return (
-              <div className="absolute bottom-36 left-1/2 -translate-x-1/2 rounded px-4 py-3 font-mono text-xs z-10"
-                style={{ background: 'rgba(9,9,11,0.97)', border: '1px solid rgba(255,102,0,0.4)', minWidth: 260 }}>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-[10px] uppercase tracking-widest" style={{ color: '#ff6600' }}>⊕ INTERCEPT CALC</span>
-                  <button onClick={() => { setInterceptTarget(null); setInterceptMode(false) }}
-                    className="font-mono text-xs" style={{ color: 'var(--muted)' }}>[×]</button>
+        {/* HERO */}
+        <section className="l-hero">
+          <div className="l-wrap">
+            <div className="l-hero__inner">
+              <div>
+                <div className="l-hero__meta">
+                  <span className="l-hero__meta-pulse" />
+                  <span className="l-hero__meta-text"><strong>LIVE</strong> · {fmt(tracks.air)} active tracks · 147 regions</span>
                 </div>
-                <div className="flex gap-4 mb-2">
-                  <span style={{ color: 'var(--accent)' }}>{interceptPair[0].callsign || interceptPair[0].icao24.toUpperCase()}</span>
-                  <span style={{ color: 'var(--muted)' }}>→</span>
-                  <span style={{ color: '#ff6600' }}>{interceptPair[1].callsign || interceptPair[1].icao24.toUpperCase()}</span>
+                <h1 className="l-hero__title">
+                  Global<br/>
+                  situational<br/>
+                  <em>awareness,</em><br/>
+                  at operator<br/>
+                  tempo.
+                </h1>
+                <p className="l-hero__sub">
+                  <strong>Skyveil</strong> ingests every public signal — ADS-B, AIS, NOTAMs, GDELT, satellite imagery — and resolves them into a single, queryable picture of the world. <strong>No black boxes.</strong> No proprietary feeds. Open intelligence, refined.
+                </p>
+                <div className="l-hero__cta">
+                  <a href="#access" className="l-btn">
+                    Request Access
+                    <svg className="l-btn__arrow" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
+                      <path d="M1 5h8M5 1l4 4-4 4"/>
+                    </svg>
+                  </a>
+                  <a href="/console" className="l-btn l-btn--ghost">View Live Console</a>
                 </div>
-                <div className="grid grid-cols-2 gap-x-6 gap-y-1">
-                  <span style={{ color: 'var(--muted)' }}>Distance</span>
-                  <span style={{ color: 'var(--foreground)', fontWeight: 700 }}>{ic.distKm} km</span>
-                  <span style={{ color: 'var(--muted)' }}>Bearing</span>
-                  <span style={{ color: 'var(--foreground)', fontWeight: 700 }}>{ic.bearingDeg}°</span>
-                  <span style={{ color: 'var(--muted)' }}>Closing</span>
-                  <span style={{ color: ic.closingKmh > 0 ? '#ef4444' : '#f59e0b', fontWeight: 700 }}>
-                    {ic.closingKmh > 0 ? `${ic.closingKmh} km/h` : 'DIVERGING'}
-                  </span>
-                  <span style={{ color: 'var(--muted)' }}>ETA</span>
-                  <span style={{ color: '#ef4444', fontWeight: 700 }}>
-                    {ic.etaMin !== null ? `${ic.etaMin} min` : '—'}
-                  </span>
+                <div className="l-hero__telemetry">
+                  <div className="l-telem"><div className="l-telem__label">Airborne</div><div className="l-telem__value">{fmt(tracks.air)}</div></div>
+                  <div className="l-telem"><div className="l-telem__label">Naval</div><div className="l-telem__value">{fmt(tracks.nav)}</div></div>
+                  <div className="l-telem"><div className="l-telem__label">NOTAMs · 24h</div><div className="l-telem__value">{fmt(tracks.not)}</div></div>
+                  <div className="l-telem"><div className="l-telem__label">Events</div><div className="l-telem__value">{fmt(tracks.evt)}</div></div>
                 </div>
               </div>
-            )
-          })()}
 
-          {/* Fullscreen exit hint */}
-          {fullscreen && (
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded font-mono text-[10px] pointer-events-none"
-              style={{ background: 'rgba(9,9,11,0.7)', border: '1px solid var(--border)', color: 'var(--muted)' }}>
-              F / ESC → exit fullscreen
+              {/* Radar */}
+              <div className="l-hero__radar">
+                <div className="l-hud-corner tl"/><div className="l-hud-corner tr"/>
+                <div className="l-hud-corner bl"/><div className="l-hud-corner br"/>
+                <div className="l-radar-coords tl">LAT 45°30&apos;N<br/>LON 073°34&apos;W</div>
+                <div className="l-radar-coords tr">MODE TRACK<br/>ZOOM 0.62x</div>
+                <div className="l-radar-coords bl">REF: GMT<br/>PROJ: AZIM</div>
+                <div className="l-radar-coords br">PING {radarPing}ms<br/>QOS NOMINAL</div>
+                <svg viewBox="0 0 540 540" xmlns="http://www.w3.org/2000/svg" style={{width:'100%',height:'100%'}}>
+                  <defs>
+                    <radialGradient id="rgrad" cx="50%" cy="50%" r="50%">
+                      <stop offset="0%" stopColor="#c9d6dd" stopOpacity="0.06"/>
+                      <stop offset="70%" stopColor="#c9d6dd" stopOpacity="0"/>
+                    </radialGradient>
+                    <linearGradient id="sweep-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+                      <stop offset="0%" stopColor="#c9d6dd" stopOpacity="0"/>
+                      <stop offset="100%" stopColor="#c9d6dd" stopOpacity="0.45"/>
+                    </linearGradient>
+                    <pattern id="dotgrid" x="0" y="0" width="14" height="14" patternUnits="userSpaceOnUse">
+                      <circle cx="1" cy="1" r="0.6" fill="#2a2e33"/>
+                    </pattern>
+                  </defs>
+                  <circle cx="270" cy="270" r="240" fill="url(#rgrad)"/>
+                  <circle cx="270" cy="270" r="240" fill="url(#dotgrid)" opacity="0.5"/>
+                  <g fill="none" stroke="#2a2e33" strokeWidth="0.5">
+                    <circle cx="270" cy="270" r="60"/><circle cx="270" cy="270" r="120"/>
+                    <circle cx="270" cy="270" r="180"/><circle cx="270" cy="270" r="240"/>
+                  </g>
+                  <g stroke="#2a2e33" strokeWidth="0.5">
+                    <line x1="30" y1="270" x2="510" y2="270"/>
+                    <line x1="270" y1="30" x2="270" y2="510"/>
+                  </g>
+                  <g fill="#1c1f23" stroke="#2a2e33" strokeWidth="0.4" opacity="0.75">
+                    <path d="M155 160 Q140 175 145 200 Q140 220 155 240 Q175 260 200 250 Q220 230 215 205 Q210 180 195 165 Q180 155 170 158 Z"/>
+                    <path d="M210 295 Q205 320 215 345 Q230 360 230 380 Q220 395 215 380 Q205 360 200 335 Q200 310 210 295 Z"/>
+                    <path d="M275 175 Q285 175 295 185 Q305 195 300 205 Q290 210 280 205 Q272 195 275 185 Z"/>
+                    <path d="M285 220 Q300 215 310 230 Q320 260 315 290 Q305 320 300 335 Q290 340 285 320 Q275 290 280 260 Q280 235 285 220 Z"/>
+                    <path d="M310 165 Q345 160 380 175 Q400 195 395 220 Q380 235 360 230 Q335 225 320 215 Q310 200 310 185 Z"/>
+                    <path d="M390 320 Q410 315 425 325 Q425 340 410 345 Q395 345 388 335 Z"/>
+                  </g>
+                  <g ref={sweepRef} className="l-radar-sweep">
+                    <path d="M270 270 L510 270 A240 240 0 0 0 423 90 Z" fill="url(#sweep-grad)"/>
+                  </g>
+                  <g>
+                    {[[170,195],[295,190],[365,200],[200,310],[403,328]].map(([cx,cy],i) => (
+                      <g key={i}><circle cx={cx} cy={cy} r="2" fill="#c9d6dd"/><circle cx={cx} cy={cy} r="6" fill="none" stroke="#c9d6dd" strokeWidth="0.5" opacity="0.4"/></g>
+                    ))}
+                    {[[305,265],[346,190]].map(([cx,cy],i) => (
+                      <g key={i}><circle cx={cx} cy={cy} r="3" fill="#ff4530"/>
+                        <circle cx={cx} cy={cy} r="9" fill="none" stroke="#ff4530" strokeWidth="0.7" opacity="0.6">
+                          <animate attributeName="r" values="3;14;3" dur="2.4s" begin={`${i*0.6}s`} repeatCount="indefinite"/>
+                          <animate attributeName="opacity" values="0.7;0;0.7" dur="2.4s" begin={`${i*0.6}s`} repeatCount="indefinite"/>
+                        </circle>
+                      </g>
+                    ))}
+                    <g><circle cx="380" cy="220" r="2.5" fill="#e8a33c"/><circle cx="380" cy="220" r="7" fill="none" stroke="#e8a33c" strokeWidth="0.5" opacity="0.5"/></g>
+                  </g>
+                  <g stroke="#c9d6dd" strokeWidth="0.7" fill="none" opacity="0.8">
+                    <circle cx="270" cy="270" r="4"/>
+                    <line x1="262" y1="270" x2="266" y2="270"/><line x1="274" y1="270" x2="278" y2="270"/>
+                    <line x1="270" y1="262" x2="270" y2="266"/><line x1="270" y1="274" x2="270" y2="278"/>
+                  </g>
+                </svg>
+              </div>
             </div>
-          )}
-
-          <div className="absolute bottom-4 left-4 rounded px-3 py-2 font-mono text-xs pointer-events-none"
-            style={{ background: 'rgba(9,9,11,0.85)', border: '1px solid var(--border)', color: 'var(--muted)' }}>
-            <div>Airborne <span style={{ color: 'var(--accent)', fontWeight: 700 }}>{aircraft.filter(a => !a.onGround).length}</span></div>
-            <div>Naval <span style={{ color: '#00b4ff', fontWeight: 700 }}>{ships.length}</span></div>
-            <div>NOTAMs <span style={{ color: '#fb923c', fontWeight: 700 }}>{notams.length}</span></div>
-            <div>Formations <span style={{ color: formations.length > 0 ? '#f59e0b' : 'var(--muted)', fontWeight: 700 }}>{formations.length}</span></div>
-            <div>Clusters <span style={{ color: clusters.length > 0 ? 'var(--threat)' : 'var(--muted)', fontWeight: 700 }}>{clusters.length}</span></div>
           </div>
-          <BriefDrawer brief={brief} history={briefHistory} loading={briefLoading} error={briefError} onClose={closeBrief} />
-        </main>
+        </section>
 
-        <aside className={`w-80 shrink-0 flex flex-col overflow-hidden${fullscreen ? ' hidden' : ''}`} style={{ borderLeft: '1px solid var(--border)' }}>
-          <EventsFeed events={events} activities={activityLog} />
-        </aside>
-      </div>
+        {/* TICKER */}
+        <div className="l-ticker">
+          <div className="l-ticker__track">
+            {tickerDouble.map((item, i) => (
+              <span key={i} className="l-ticker__item">
+                <span className={`l-ticker__tag${item.cls === 'alert' ? ' l-ticker__tag--alert' : item.cls === 'amber' ? ' l-ticker__tag--amber' : ''}`}>{item.tag}</span>
+                <span className="l-ticker__sep">·</span>
+                <span>{item.text}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {/* 01 CAPABILITIES */}
+        <section className="l-section" id="capabilities">
+          <div className="l-wrap">
+            <div className="l-section__head">
+              <div className="l-section__num"><span>01</span> — Capabilities</div>
+              <h2 className="l-section__title">Four signal classes. <em>One picture.</em> Resolved in real time across every theatre.</h2>
+            </div>
+            <div className="l-caps">
+              <div className="l-cap">
+                <svg className="l-cap__icon" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="1"><path d="M16 4l4 14 10 4-10 2-4 8-4-8-10-2 10-4z"/></svg>
+                <div className="l-cap__id">SVL — 01</div><h3 className="l-cap__name">Aerial</h3>
+                <p className="l-cap__desc">Multilateration of ADS-B, MLAT and Mode-S signals. Military, civil, state. Squawk-resolved with formation detection.</p>
+                <div className="l-cap__specs">
+                  <div className="l-cap__spec"><span className="l-cap__spec-k">Latency</span><span className="l-cap__spec-v">&lt; 1.4s</span></div>
+                  <div className="l-cap__spec"><span className="l-cap__spec-k">Coverage</span><span className="l-cap__spec-v">147 ctr</span></div>
+                  <div className="l-cap__spec"><span className="l-cap__spec-k">ICAO</span><span className="l-cap__spec-v">98.7%</span></div>
+                </div>
+              </div>
+              <div className="l-cap">
+                <svg className="l-cap__icon" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="1"><path d="M4 22h24M6 22V12l10-6 10 6v10M16 22V14"/></svg>
+                <div className="l-cap__id">SVL — 02</div><h3 className="l-cap__name">Maritime</h3>
+                <p className="l-cap__desc">AIS broadcasts, vessel registries, port-call data, dark-vessel inference. From bulk carriers to gray-hull movements.</p>
+                <div className="l-cap__specs">
+                  <div className="l-cap__spec"><span className="l-cap__spec-k">Vessels</span><span className="l-cap__spec-v">412k+</span></div>
+                  <div className="l-cap__spec"><span className="l-cap__spec-k">Ports</span><span className="l-cap__spec-v">3,940</span></div>
+                  <div className="l-cap__spec"><span className="l-cap__spec-k">Refresh</span><span className="l-cap__spec-v">3s</span></div>
+                </div>
+              </div>
+              <div className="l-cap">
+                <svg className="l-cap__icon" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="1"><rect x="5" y="8" width="22" height="16"/><path d="M5 12h22M9 16h6M9 19h10"/></svg>
+                <div className="l-cap__id">SVL — 03</div><h3 className="l-cap__name">NOTAMs</h3>
+                <p className="l-cap__desc">Notice-to-airmen parsing, geofenced alerts, exercise windows. Closures, restrictions, military operating areas.</p>
+                <div className="l-cap__specs">
+                  <div className="l-cap__spec"><span className="l-cap__spec-k">Sources</span><span className="l-cap__spec-v">214</span></div>
+                  <div className="l-cap__spec"><span className="l-cap__spec-k">Window</span><span className="l-cap__spec-v">24h+</span></div>
+                  <div className="l-cap__spec"><span className="l-cap__spec-k">Parsed</span><span className="l-cap__spec-v">Auto</span></div>
+                </div>
+              </div>
+              <div className="l-cap">
+                <svg className="l-cap__icon" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="1"><circle cx="16" cy="16" r="12"/><path d="M4 16h24M16 4c4 3 6 7 6 12s-2 9-6 12c-4-3-6-7-6-12s2-9 6-12z"/></svg>
+                <div className="l-cap__id">SVL — 04</div><h3 className="l-cap__name">OSINT</h3>
+                <p className="l-cap__desc">GDELT 2.0 ingest, language-resolved geocoding, source clustering, narrative drift. Verified open sources only.</p>
+                <div className="l-cap__specs">
+                  <div className="l-cap__spec"><span className="l-cap__spec-k">Articles/d</span><span className="l-cap__spec-v">340k</span></div>
+                  <div className="l-cap__spec"><span className="l-cap__spec-k">Languages</span><span className="l-cap__spec-v">68</span></div>
+                  <div className="l-cap__spec"><span className="l-cap__spec-k">Geocoded</span><span className="l-cap__spec-v">96.1%</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* 02 CONSOLE */}
+        <section className="l-section" id="console">
+          <div className="l-wrap">
+            <div className="l-section__head">
+              <div className="l-section__num"><span>02</span> — Console</div>
+              <h2 className="l-section__title">A single pane of glass. <em>The world,</em> queryable.</h2>
+            </div>
+            <div className="l-console">
+              <div className="l-console__bar">
+                <div className="l-console__bar-l">
+                  <span className="l-console__sig"/>
+                  <span className="l-console__title">SKYVEIL · INTEL CONSOLE</span>
+                </div>
+                <div className="l-console__bar-r">
+                  <span>SECTOR · GLOBAL</span>
+                  <span>FILTER · MIL</span>
+                  <span>{consoleTime}</span>
+                </div>
+              </div>
+              <div className="l-console__body">
+                <div className="l-console__main">
+                  <div className="l-console__overlay">
+                    <div>SECTOR <strong>EUR · MED</strong></div>
+                    <div>TRACKS <strong>{fmt(tracks.console)}</strong></div>
+                    <div>FORMATIONS <strong>14</strong></div>
+                  </div>
+                  <div className="l-console__overlay-r">
+                    FRAME · <strong>{consoleFrame}</strong><br/>REFRESH · <strong>1.4s</strong>
+                  </div>
+                  <div className="l-console__globe">
+                    <svg viewBox="0 0 700 540" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">
+                      <defs>
+                        <pattern id="cdotgrid" x="0" y="0" width="10" height="10" patternUnits="userSpaceOnUse">
+                          <circle cx="1" cy="1" r="0.5" fill="#2a2e33"/>
+                        </pattern>
+                      </defs>
+                      <g fill="none" stroke="#1c1f23" strokeWidth="0.5">
+                        <ellipse cx="350" cy="270" rx="320" ry="60"/><ellipse cx="350" cy="270" rx="320" ry="120"/>
+                        <ellipse cx="350" cy="270" rx="320" ry="180"/><ellipse cx="350" cy="270" rx="320" ry="240"/>
+                      </g>
+                      <g fill="none" stroke="#1c1f23" strokeWidth="0.5">
+                        <ellipse cx="350" cy="270" rx="60" ry="240"/><ellipse cx="350" cy="270" rx="120" ry="240"/>
+                        <ellipse cx="350" cy="270" rx="180" ry="240"/><ellipse cx="350" cy="270" rx="240" ry="240"/>
+                        <ellipse cx="350" cy="270" rx="300" ry="240"/>
+                      </g>
+                      <g fill="#3a4046">
+                        {/* N. America */}
+                        {[[160,200],[170,195],[180,190],[155,215],[165,210],[175,205],[185,200],[160,230],[170,225],[180,220],[190,215],[200,210],[170,245],[180,240],[190,235],[200,230],[210,225],[190,260],[200,255],[210,250],[200,275],[210,270]].map(([cx,cy],i) => <circle key={`na${i}`} cx={cx} cy={cy} r="1.8"/>)}
+                        {/* S. America */}
+                        {[[225,320],[235,325],[225,335],[235,340],[245,345],[230,355],[240,360],[235,375],[245,380],[245,395]].map(([cx,cy],i) => <circle key={`sa${i}`} cx={cx} cy={cy} r="1.8"/>)}
+                        {/* Europe */}
+                        {[[345,200],[355,195],[365,200],[375,205],[355,215],[365,210],[375,215],[385,220],[370,225],[380,230]].map(([cx,cy],i) => <circle key={`eu${i}`} cx={cx} cy={cy} r="1.8"/>)}
+                        {/* Africa */}
+                        {[[360,250],[370,255],[380,250],[360,275],[370,280],[380,275],[390,280],[365,300],[375,305],[385,300],[370,325],[380,330],[375,350]].map(([cx,cy],i) => <circle key={`af${i}`} cx={cx} cy={cy} r="1.8"/>)}
+                        {/* Asia */}
+                        {[[410,190],[420,195],[430,190],[440,195],[450,190],[460,195],[470,200],[480,195],[490,200],[420,210],[430,215],[440,210],[450,215],[460,220],[470,215],[480,220],[495,215],[430,235],[445,230],[460,235],[475,240],[490,245],[450,255],[465,260],[485,270],[490,290],[500,295],[510,290]].map(([cx,cy],i) => <circle key={`as${i}`} cx={cx} cy={cy} r="1.8"/>)}
+                        {/* Australia */}
+                        {[[510,345],[520,340],[530,345],[540,350],[515,360],[525,355],[535,360]].map(([cx,cy],i) => <circle key={`au${i}`} cx={cx} cy={cy} r="1.8"/>)}
+                      </g>
+                      <g fill="none" stroke="#c9d6dd" strokeWidth="0.6" opacity="0.4" strokeDasharray="2 3">
+                        <path d="M180 230 Q280 210 360 220"/>
+                        <path d="M210 250 Q300 270 420 215"/>
+                        <path d="M380 280 Q450 250 520 240"/>
+                        <path d="M180 200 Q340 160 480 200"/>
+                      </g>
+                      <g>
+                        {[[280,215,20],[330,245,40],[440,260,-20],[360,195,70],[490,295,110]].map(([x,y,r],i) => (
+                          <g key={i} transform={`translate(${x},${y}) rotate(${r})`}>
+                            <path d="M0 -4 L1 1 L4 2 L1 3 L0 6 L-1 3 L-4 2 L-1 1 Z" fill="#c9d6dd"/>
+                          </g>
+                        ))}
+                      </g>
+                      <g>
+                        <circle cx="380" cy="245" r="3" fill="#ff4530"/>
+                        <circle cx="380" cy="245" r="14" fill="none" stroke="#ff4530" strokeWidth="0.7" opacity="0.6">
+                          <animate attributeName="r" values="3;26;3" dur="3s" repeatCount="indefinite"/>
+                          <animate attributeName="opacity" values="0.7;0;0.7" dur="3s" repeatCount="indefinite"/>
+                        </circle>
+                        <text x="395" y="248" fontFamily="var(--font-geist-mono)" fontSize="9" fill="#ff4530" letterSpacing="2">CONTACT · 14 AC</text>
+                      </g>
+                      <g>
+                        <circle cx="465" cy="225" r="2.5" fill="#e8a33c"/>
+                        <circle cx="465" cy="225" r="10" fill="none" stroke="#e8a33c" strokeWidth="0.6" opacity="0.5">
+                          <animate attributeName="r" values="2.5;18;2.5" dur="3.4s" begin="0.8s" repeatCount="indefinite"/>
+                          <animate attributeName="opacity" values="0.6;0;0.6" dur="3.4s" begin="0.8s" repeatCount="indefinite"/>
+                        </circle>
+                        <text x="478" y="228" fontFamily="var(--font-geist-mono)" fontSize="9" fill="#e8a33c" letterSpacing="2">NOTAM</text>
+                      </g>
+                      <text x="20" y="500" fontFamily="var(--font-geist-mono)" fontSize="9" fill="#5a5d61" letterSpacing="2">PROJECTION · MERCATOR / CLIPPED</text>
+                      <text x="680" y="500" textAnchor="end" fontFamily="var(--font-geist-mono)" fontSize="9" fill="#5a5d61" letterSpacing="2">LAYER · MIL.AIR + MARITIME</text>
+                    </svg>
+                  </div>
+                </div>
+                <div className="l-console__feed">
+                  <div className="l-feed__head">
+                    <span><strong>INTEL FEED</strong> · LIVE</span>
+                    <span>OSINT · GDELT · MIL</span>
+                  </div>
+                  <div className="l-feed__list">
+                    {visibleFeed.map((item, i) => (
+                      <div key={`${feedIdx}-${i}`} className="l-feed__item" style={{ animationDelay: `${i * 0.05}s` }}>
+                        <div className="l-feed__item-head">
+                          <span className={`l-feed__cat${item.cls === 'alert' ? ' l-feed__cat--alert' : item.cls === 'amber' ? ' l-feed__cat--amber' : ''}`}>{item.cat}</span>
+                          <span className="l-feed__time">{item.loc}</span>
+                        </div>
+                        <div className="l-feed__text">{item.text}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* 03 COVERAGE */}
+        <section className="l-section" id="coverage">
+          <div className="l-wrap">
+            <div className="l-section__head">
+              <div className="l-section__num"><span>03</span> — Coverage</div>
+              <h2 className="l-section__title">Continuous global ingest. <em>No theatre uncovered.</em></h2>
+            </div>
+            <div className="l-coverage">
+              <div className="l-map-grid">
+                <svg viewBox="0 0 600 400" xmlns="http://www.w3.org/2000/svg">
+                  <g fill="#2a2e33">
+                    {[[120,130],[130,125],[140,130],[115,140],[125,140],[135,140],[145,140],[120,150],[130,150],[140,150],[150,150],[160,150],[135,160],[145,160],[155,160],[165,160],[155,170],[165,170],[160,180],[170,180]].map(([cx,cy],i) => <circle key={`m-na${i}`} cx={cx} cy={cy} r="1.4"/>)}
+                    {[[170,220],[180,225],[175,235],[185,240],[180,250],[190,255],[185,265],[195,270],[190,280],[195,290]].map(([cx,cy],i) => <circle key={`m-sa${i}`} cx={cx} cy={cy} r="1.4"/>)}
+                    {[[290,130],[300,125],[310,130],[320,135],[295,140],[305,140],[315,140],[325,140],[300,150],[310,150],[320,150],[330,150]].map(([cx,cy],i) => <circle key={`m-eu${i}`} cx={cx} cy={cy} r="1.4"/>)}
+                    {[[305,170],[315,175],[325,170],[305,185],[315,190],[325,185],[335,190],[310,205],[320,210],[330,205],[315,225],[325,230],[320,245],[330,250]].map(([cx,cy],i) => <circle key={`m-af${i}`} cx={cx} cy={cy} r="1.4"/>)}
+                    {[[350,120],[360,125],[370,120],[380,125],[390,120],[400,125],[410,120],[420,125],[430,120],[440,130],[450,125],[460,135],[365,140],[375,135],[385,140],[395,135],[405,140],[415,135],[425,140],[435,135],[445,140],[455,145],[380,155],[395,150],[410,155],[425,150],[440,155],[455,160],[465,155],[400,170],[415,175],[430,170],[445,175],[460,180],[455,195],[465,200],[475,195]].map(([cx,cy],i) => <circle key={`m-as${i}`} cx={cx} cy={cy} r="1.4"/>)}
+                    {[[475,265],[485,260],[495,265],[505,270],[510,280],[500,285],[490,275]].map(([cx,cy],i) => <circle key={`m-oc${i}`} cx={cx} cy={cy} r="1.4"/>)}
+                  </g>
+                  <g>
+                    {[[155,155],[310,140],[425,155]].map(([cx,cy],i) => (
+                      <g key={i}>
+                        <circle cx={cx} cy={cy} r="2" fill="#c9d6dd"/>
+                        <circle cx={cx} cy={cy} r="6" fill="none" stroke="#c9d6dd" strokeWidth="0.5" opacity="0.5">
+                          <animate attributeName="r" values="2;14;2" dur="3s" begin={`${i*0.5}s`} repeatCount="indefinite"/>
+                          <animate attributeName="opacity" values="0.6;0;0.6" dur="3s" begin={`${i*0.5}s`} repeatCount="indefinite"/>
+                        </circle>
+                      </g>
+                    ))}
+                    {[[335,195],[450,170]].map(([cx,cy],i) => (
+                      <g key={i}>
+                        <circle cx={cx} cy={cy} r="2.5" fill="#ff4530"/>
+                        <circle cx={cx} cy={cy} r="8" fill="none" stroke="#ff4530" strokeWidth="0.6" opacity="0.6">
+                          <animate attributeName="r" values="2.5;18;2.5" dur="2.4s" begin={`${i}s`} repeatCount="indefinite"/>
+                          <animate attributeName="opacity" values="0.7;0;0.7" dur="2.4s" begin={`${i}s`} repeatCount="indefinite"/>
+                        </circle>
+                      </g>
+                    ))}
+                  </g>
+                  <g fill="none" stroke="#c9d6dd" strokeWidth="0.5" opacity="0.25" strokeDasharray="2 3">
+                    <path d="M155 155 Q260 80 310 140"/>
+                    <path d="M310 140 Q380 90 425 155"/>
+                    <path d="M155 155 Q280 280 335 195"/>
+                    <path d="M425 155 Q445 165 450 170"/>
+                  </g>
+                  <text x="20" y="20" fontFamily="var(--font-geist-mono)" fontSize="9" fill="#5a5d61" letterSpacing="2">REAL-TIME COVERAGE · NODE NETWORK</text>
+                  <text x="580" y="20" textAnchor="end" fontFamily="var(--font-geist-mono)" fontSize="9" fill="#5a5d61" letterSpacing="2">147 REGIONS</text>
+                  <text x="20" y="385" fontFamily="var(--font-geist-mono)" fontSize="9" fill="#5a5d61" letterSpacing="2">UPDATE · 1.4s</text>
+                  <text x="580" y="385" textAnchor="end" fontFamily="var(--font-geist-mono)" fontSize="9" fill="#5a5d61" letterSpacing="2">NOMINAL</text>
+                </svg>
+              </div>
+              <div className="l-metrics">
+                <div className="l-metric"><span className="l-metric__id">M.01</span><span className="l-metric__num" data-count-target="12847">0</span><span className="l-metric__lab">Active aerial tracks · live</span></div>
+                <div className="l-metric"><span className="l-metric__id">M.02</span><span className="l-metric__num" data-count-target="412000">0</span><span className="l-metric__lab">Vessels resolved across registries</span></div>
+                <div className="l-metric"><span className="l-metric__id">M.03</span><span className="l-metric__num" data-count-target="147">0</span><span className="l-metric__lab">Regions / FIRs covered</span></div>
+                <div className="l-metric"><span className="l-metric__id">M.04</span><span className="l-metric__num" data-count-target="340">0</span><span style={{ fontFamily:'var(--font-geist-sans)', fontSize:'clamp(28px,3vw,40px)', marginLeft:'-8px', opacity:0.7 }}>k</span><span className="l-metric__lab">OSINT articles ingested · daily</span></div>
+                <div className="l-metric"><span className="l-metric__id">M.05</span><span className="l-metric__num">1.4<span style={{ fontFamily:'var(--font-geist-sans)', fontSize:'0.5em', opacity:0.6 }}>s</span></span><span className="l-metric__lab">End-to-end signal latency</span></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* 04 SOURCES */}
+        <section className="l-section" id="sources">
+          <div className="l-wrap">
+            <div className="l-section__head">
+              <div className="l-section__num"><span>04</span> — Sources</div>
+              <h2 className="l-section__title">Open by design. <em>Auditable</em> by default.</h2>
+            </div>
+            <div className="l-method">
+              {[
+                { id:'M.01 / INGEST', title:'Public signals only.', text:'ADS-B, AIS, NOTAMs, GDELT 2.0, satellite tasking schedules, public registries, government feeds. Every byte is traceable to its origin.' },
+                { id:'M.02 / RESOLVE', title:'Cross-corroboration.', text:'Multilateration, hex correlation, callsign-to-registry joins, vessel-to-port reconciliation. Confidence scores attached to every track.' },
+                { id:'M.03 / SURFACE', title:'Analyst-grade UI.', text:'Filter by squawk, registration, owner, formation, region. Export to GeoJSON, CSV, KML. API access at every layer.' },
+                { id:'M.04 / RETAIN', title:'Cold storage, indexed.', text:'Every frame archived. 36-month rolling history. Replay any sector, any moment. Time-travel debugging for analysts.' },
+                { id:'M.05 / ALERT', title:'Geofenced triggers.', text:'Webhook, email, Slack, RSS. Build custom watchlists by hex, ICAO range, MMSI, polygon. Sub-second dispatch.' },
+                { id:'M.06 / OPEN', title:'No black boxes.', text:'Source citations on every event. Methodology documented. Pull requests welcome on the public corpus and resolution rules.' },
+              ].map(cell => (
+                <div key={cell.id} className="l-method__cell">
+                  <div className="l-method__id">{cell.id}</div>
+                  <h4 className="l-method__title">{cell.title}</h4>
+                  <p className="l-method__text">{cell.text}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* QUOTE */}
+        <section className="l-quote-section">
+          <div className="l-wrap">
+            <div className="l-quote">
+              &ldquo;<em>The best intelligence picture</em> is the one anyone can verify. Skyveil is open by construction — not by promise.&rdquo;
+            </div>
+            <div className="l-quote__attr">
+              <span>— SKYVEIL · DESIGN PRINCIPLE</span>
+              <span>FILED <span>2025.04.12</span></span>
+            </div>
+          </div>
+        </section>
+
+        {/* CTA */}
+        <section className="l-cta" id="access">
+          <div className="l-wrap">
+            <div className="l-cta__inner">
+              <div className="l-cta__pre">
+                <span className="l-cta__pre-line"/><span className="l-cta__pre-text">EARLY ACCESS · GATED</span><span className="l-cta__pre-line"/>
+              </div>
+              <h2 className="l-cta__title">Watch the world<br/><em>before it watches</em><br/>you back.</h2>
+              <p className="l-cta__sub">Request operator credentials. Approved analysts, journalists, and researchers receive console access within 72 hours.</p>
+              <form className="l-cta__form" onSubmit={e => { e.preventDefault(); setSubmitted(true) }}>
+                <input type="email" placeholder="operator@domain.tld" required />
+                <button type="submit">{submitted ? '✓ Submitted' : 'Request →'}</button>
+              </form>
+              <div className="l-cta__note">SECURE · TLS 1.3 · NO TRACKERS · 147 SLOTS REMAINING THIS QUARTER</div>
+            </div>
+          </div>
+        </section>
+
+        {/* FOOTER */}
+        <footer className="l-footer">
+          <div className="l-wrap">
+            <div className="l-foot">
+              <div className="l-foot__brand">
+                SKYVEIL.
+                <p>Global situational awareness, refined for the open-source intelligence community. Built independently. No defense-prime entanglements.</p>
+              </div>
+              <div className="l-foot__col">
+                <h4>Product</h4>
+                <ul><li><a href="#">Console</a></li><li><a href="#">API</a></li><li><a href="#">Replay</a></li><li><a href="#">Watchlists</a></li></ul>
+              </div>
+              <div className="l-foot__col">
+                <h4>Coverage</h4>
+                <ul><li><a href="#">Aerial</a></li><li><a href="#">Maritime</a></li><li><a href="#">NOTAMs</a></li><li><a href="#">OSINT</a></li></ul>
+              </div>
+              <div className="l-foot__col">
+                <h4>Company</h4>
+                <ul><li><a href="#">Methodology</a></li><li><a href="#">Status</a></li><li><a href="#">Press</a></li><li><a href="#">Contact</a></li></ul>
+              </div>
+            </div>
+            <div className="l-foot__bottom">
+              <span>© 2025 SKYVEIL · ALL DATA PUBLIC-SOURCE</span>
+              <span>BUILD v2.41.07 · UPTIME 99.987%</span>
+              <span>MONTRÉAL · LISBON · SINGAPORE</span>
+            </div>
+          </div>
+        </footer>
+
+      </main>
     </div>
   )
 }
