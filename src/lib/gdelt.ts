@@ -9,6 +9,7 @@ interface GdeltArticle {
   seendate: string
   domain: string
   sourcecountry: string
+  tone?: number
 }
 
 interface GdeltResponse {
@@ -64,14 +65,14 @@ export async function fetchConflictEvents(): Promise<ConflictEvent[]> {
     const data: GdeltResponse = JSON.parse(raw)
     if (!data.articles) return []
 
-    return data.articles.map((a, i) => ({
+    return (data.articles ?? []).map((a, i) => ({
       id: `gdelt-${i}-${Date.now()}`,
       title: a.title,
       url: a.url,
       source: a.domain,
       publishedAt: parseGdeltDate(a.seendate),
       domain: a.sourcecountry ?? '',
-      tone: 0,
+      tone: typeof a.tone === 'number' ? a.tone : 0,
     }))
   } catch {
     return []

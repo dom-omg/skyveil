@@ -209,9 +209,11 @@ export default function MapComponent({
           const el = document.createElement('div')
           const col = shipColor(d.type)
           el.innerHTML = `<div title="${d.name}" style="width:8px;height:8px;border-radius:2px;background:${col};box-shadow:0 0 6px ${col};transform:rotate(45deg);cursor:pointer;opacity:0.9;border:1px solid ${col}88;"></div>`
-          el.addEventListener('click', () => {
+          const handler = () => {
             onBriefRef.current({ lat: d.lat, lon: d.lon, radiusKm: 300 })
-          })
+          }
+          el.removeEventListener('click', handler)
+          el.addEventListener('click', handler)
           return el
         })
 

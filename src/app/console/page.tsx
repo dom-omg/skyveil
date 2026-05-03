@@ -12,6 +12,7 @@ import EventsFeed from '@/components/EventsFeed'
 import BriefDrawer from '@/components/BriefDrawer'
 import LiveATC from '@/components/LiveATC'
 import NewsPlayer from '@/components/NewsPlayer'
+import InterceptPanel from '@/components/InterceptPanel'
 import type { BriefTarget } from '@/components/Map'
 
 const GlobeMap = dynamic(() => import('@/components/Map'), {
@@ -37,32 +38,6 @@ export interface ActivityEvent {
 const MAX_HISTORY = 5
 const SPEED_ANOMALY_THRESHOLD = 60
 const MAX_TRAIL_POINTS = 6
-
-function computeIntercept(a: Aircraft, b: Aircraft) {
-  const R = 6371
-  const lat1 = (a.lat * Math.PI) / 180
-  const lat2 = (b.lat * Math.PI) / 180
-  const dLat = lat2 - lat1
-  const dLon = ((b.lon - a.lon) * Math.PI) / 180
-  const ha = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2
-  const distKm = R * 2 * Math.atan2(Math.sqrt(ha), Math.sqrt(1 - ha))
-  const y = Math.sin(dLon) * Math.cos(lat2)
-  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon)
-  const bearingDeg = ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360
-  const bRad = (bearingDeg * Math.PI) / 180
-  const ubx = Math.sin(bRad), uby = Math.cos(bRad)
-  const vAx = a.velocity * Math.sin((a.heading * Math.PI) / 180)
-  const vAy = a.velocity * Math.cos((a.heading * Math.PI) / 180)
-  const vBx = b.velocity * Math.sin((b.heading * Math.PI) / 180)
-  const vBy = b.velocity * Math.cos((b.heading * Math.PI) / 180)
-  const closingMs = (vAx - vBx) * ubx + (vAy - vBy) * uby
-  return {
-    distKm: Math.round(distKm),
-    bearingDeg: Math.round(bearingDeg),
-    closingKmh: Math.round(closingMs * 3.6),
-    etaMin: closingMs > 10 ? Math.round((distKm * 1000) / closingMs / 60) : null,
-  }
-}
 
 export default function Dashboard() {
   const [aircraft, setAircraft] = useState<Aircraft[]>([])
@@ -119,8 +94,17 @@ export default function Dashboard() {
 
   // Fetch ships and NOTAMs once on mount
   useEffect(() => {
-    fetch('/api/ships').then(r => r.json()).then((d: { ships: Ship[] }) => setShips(d.ships)).catch(() => {})
-    fetch('/api/notams').then(r => r.json()).then((d: { notams: Notam[] }) => setNotams(d.notams)).catch(() => {})
+    const controller = new AbortController()
+    const { signal } = controller
+    fetch('/api/ships', { signal })
+      .then(r => r.json())
+      .then((d: { ships: Ship[] }) => setShips(d.ships))
+      .catch((err: unknown) => { if ((err as { name?: string }).name !== 'AbortError') console.error('ships fetch error:', err) })
+    fetch('/api/notams', { signal })
+      .then(r => r.json())
+      .then((d: { notams: Notam[] }) => setNotams(d.notams))
+      .catch((err: unknown) => { if ((err as { name?: string }).name !== 'AbortError') console.error('notams fetch error:', err) })
+    return () => controller.abort()
   }, [])
 
   // Persist brief history across refreshes
@@ -289,7 +273,7 @@ export default function Dashboard() {
     const es = new EventSource('/api/stream')
     esRef.current = es
 
-    es.addEventListener('aircraft', (e: MessageEvent) => {
+    const onAircraft = (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data) as {
           aircraft: Aircraft[]
@@ -310,24 +294,31 @@ export default function Dashboard() {
           }
         }
       } catch { /* malformed */ }
-    })
+    }
 
-    es.addEventListener('events', (e: MessageEvent) => {
+    const onEvents = (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data) as { events: ConflictEvent[] }
         setEvents(data.events)
       } catch { /* malformed */ }
-    })
+    }
 
-    es.addEventListener('status', (e: MessageEvent) => {
+    const onStatus = (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data) as { message: string }
         console.warn('[stream]', data.message)
         setStatus('error')
       } catch { /* malformed */ }
-    })
+    }
+
+    es.addEventListener('aircraft', onAircraft)
+    es.addEventListener('events', onEvents)
+    es.addEventListener('status', onStatus)
 
     es.onerror = () => {
+      es.removeEventListener('aircraft', onAircraft)
+      es.removeEventListener('events', onEvents)
+      es.removeEventListener('status', onStatus)
       es.close()
       esRef.current = null
       setStatus('reconnecting')
@@ -574,39 +565,13 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* Intercept result panel */}
-          {interceptPair && (() => {
-            const ic = computeIntercept(interceptPair[0], interceptPair[1])
-            return (
-              <div className="absolute bottom-36 left-1/2 -translate-x-1/2 rounded px-4 py-3 font-mono text-xs z-10"
-                style={{ background: 'rgba(9,9,11,0.97)', border: '1px solid rgba(255,102,0,0.4)', minWidth: 260 }}>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-[10px] uppercase tracking-widest" style={{ color: '#ff6600' }}>⊕ INTERCEPT CALC</span>
-                  <button onClick={() => { setInterceptTarget(null); setInterceptMode(false) }}
-                    className="font-mono text-xs" style={{ color: 'var(--muted)' }}>[×]</button>
-                </div>
-                <div className="flex gap-4 mb-2">
-                  <span style={{ color: 'var(--accent)' }}>{interceptPair[0].callsign || interceptPair[0].icao24.toUpperCase()}</span>
-                  <span style={{ color: 'var(--muted)' }}>→</span>
-                  <span style={{ color: '#ff6600' }}>{interceptPair[1].callsign || interceptPair[1].icao24.toUpperCase()}</span>
-                </div>
-                <div className="grid grid-cols-2 gap-x-6 gap-y-1">
-                  <span style={{ color: 'var(--muted)' }}>Distance</span>
-                  <span style={{ color: 'var(--foreground)', fontWeight: 700 }}>{ic.distKm} km</span>
-                  <span style={{ color: 'var(--muted)' }}>Bearing</span>
-                  <span style={{ color: 'var(--foreground)', fontWeight: 700 }}>{ic.bearingDeg}°</span>
-                  <span style={{ color: 'var(--muted)' }}>Closing</span>
-                  <span style={{ color: ic.closingKmh > 0 ? '#ef4444' : '#f59e0b', fontWeight: 700 }}>
-                    {ic.closingKmh > 0 ? `${ic.closingKmh} km/h` : 'DIVERGING'}
-                  </span>
-                  <span style={{ color: 'var(--muted)' }}>ETA</span>
-                  <span style={{ color: '#ef4444', fontWeight: 700 }}>
-                    {ic.etaMin !== null ? `${ic.etaMin} min` : '—'}
-                  </span>
-                </div>
-              </div>
-            )
-          })()}
+          {/* Intercept panel */}
+          {interceptPair && (
+            <InterceptPanel
+              pair={interceptPair}
+              onClose={() => { setInterceptTarget(null); setInterceptMode(false) }}
+            />
+          )}
 
           {/* Fullscreen exit hint */}
           {fullscreen && (

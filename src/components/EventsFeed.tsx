@@ -48,7 +48,7 @@ export default function EventsFeed({ events, activities }: Props) {
     fetch('/api/osint')
       .then(r => r.json())
       .then((d: { items: OsintItem[] }) => setOsint(d.items))
-      .catch(() => {})
+      .catch((err: unknown) => console.error('fetch error:', err))
       .finally(() => setOsintLoading(false))
   }, [tab, osint.length])
 
@@ -58,7 +58,7 @@ export default function EventsFeed({ events, activities }: Props) {
       fetch('/api/osint')
         .then(r => r.json())
         .then((d: { items: OsintItem[] }) => setOsint(d.items))
-        .catch(() => {})
+        .catch((err: unknown) => console.error('fetch error:', err))
     }, 180_000)
     return () => clearInterval(id)
   }, [])

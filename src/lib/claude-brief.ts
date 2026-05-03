@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
-import type { Aircraft, ConflictEvent, IntelBrief } from './types'
+import type { Aircraft, ConflictEvent, IntelBrief, OsintItem } from './types'
 
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -67,10 +67,11 @@ interface BriefInput {
   aircraft: Aircraft[]
   events: ConflictEvent[]
   regionName?: string
+  osintItems?: OsintItem[]
 }
 
 export async function generateBrief(input: BriefInput): Promise<IntelBrief> {
-  const { lat, lon, radiusKm, aircraft, events, regionName } = input
+  const { lat, lon, radiusKm, aircraft, events, regionName, osintItems } = input
 
   const aircraftBlock = aircraft.length === 0
     ? 'No military aircraft detected in sector.'
@@ -84,6 +85,12 @@ export async function generateBrief(input: BriefInput): Promise<IntelBrief> {
         `- [${e.source}] ${e.title} (${e.publishedAt.slice(0, 10)})`
       ).join('\n')
 
+  const osintFeedBlock = osintItems && osintItems.length > 0
+    ? osintItems.slice(0, 6).map(item =>
+        `- [${item.source}] ${item.title} (${item.publishedAt.slice(0, 10)})`
+      ).join('\n')
+    : null
+
   const userMessage = `SECTOR BRIEF REQUEST
 Region: ${regionName ?? `${lat.toFixed(2)}°, ${lon.toFixed(2)}°`}
 Center: ${lat.toFixed(4)}, ${lon.toFixed(4)}
@@ -95,7 +102,7 @@ ${aircraftBlock}
 
 --- OSINT FEED (${events.length} articles, 24h window) ---
 ${eventsBlock}
-
+${osintFeedBlock !== null ? `\n--- RECENT OSINT FEEDS (RSS, last 6) ---\n${osintFeedBlock}\n` : ''}
 Generate SKYVEIL brief.`
 
   let response: Awaited<ReturnType<typeof client.messages.create>>
@@ -118,6 +125,9 @@ Generate SKYVEIL brief.`
     throw err
   }
 
+  if (!response.content?.length) {
+    throw new Error('Claude returned empty content')
+  }
   const raw = response.content[0].type === 'text' ? response.content[0].text : ''
 
   let parsed: {

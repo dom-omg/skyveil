@@ -9,6 +9,10 @@ export const maxDuration = 300
 export async function GET() {
   const encoder = new TextEncoder()
 
+  let aircraftInterval: ReturnType<typeof setInterval> | undefined
+  let eventsInterval: ReturnType<typeof setInterval> | undefined
+  let heartbeat: ReturnType<typeof setInterval> | undefined
+
   const stream = new ReadableStream({
     async start(controller) {
       let closed = false
@@ -53,7 +57,7 @@ export async function GET() {
         .catch(() => { /* gdelt is optional */ })
 
       // Refresh aircraft every 30s
-      const aircraftInterval = setInterval(async () => {
+      aircraftInterval = setInterval(async () => {
         try {
           const fresh = await fetchMilitaryAircraft()
           const age = getCacheAge()
@@ -64,7 +68,7 @@ export async function GET() {
       }, 30_000)
 
       // Refresh events every 5 min
-      const eventsInterval = setInterval(async () => {
+      eventsInterval = setInterval(async () => {
         try {
           const events = await fetchConflictEvents()
           send('events', { events, timestamp: Date.now() })
@@ -72,7 +76,7 @@ export async function GET() {
       }, 300_000)
 
       // Heartbeat
-      const heartbeat = setInterval(() => {
+      heartbeat = setInterval(() => {
         if (closed) {
           clearInterval(aircraftInterval)
           clearInterval(eventsInterval)
@@ -88,6 +92,11 @@ export async function GET() {
           clearInterval(heartbeat)
         }
       }, 30_000)
+    },
+    cancel() {
+      clearInterval(aircraftInterval)
+      clearInterval(eventsInterval)
+      clearInterval(heartbeat)
     },
   })
 
